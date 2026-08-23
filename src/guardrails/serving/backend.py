@@ -7,8 +7,8 @@ import re
 import subprocess
 import threading
 import time
-import uuid
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +18,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from guardrails import paths
-
+from guardrails import paths, taxonomy
+from guardrails.evaluation import metrics
 
 ROOT = paths.PROJECT_ROOT
 APP_DIR = paths.STATIC_DIR.parent
@@ -86,16 +86,9 @@ LEET_TRANSLATION = str.maketrans(
 )
 SPLIT_JOIN_RE = re.compile(r"(?<=\w)[\.\-_~`'\"\\\/]+(?=\w)")
 LETTER_SPACED_RE = re.compile(r"\b(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ]\s+){2,}[a-zA-ZáéíóúñÁÉÍÓÚÑ]\b")
-LABEL_PRIORITY = {
-    "VIOLENCE": 80,
-    "HARMFUL": 70,
-    "PROMPT_INJECTION": 65,
-    "JAILBREAK": 64,
-    "HATE": 60,
-    "SEXUAL": 55,
-    "POLITICS": 45,
-    "SAFE": 0,
-}
+# El orden de severidad vive en guardrails.taxonomy, que es también el que usa
+# la generación de datos y el generador del conjunto de evaluación.
+LABEL_PRIORITY = taxonomy.SEVERITY
 
 
 def select_default_adapter() -> str:
@@ -146,11 +139,10 @@ def normalize_for_guardrail(text: str) -> dict[str, Any]:
 
 
 def result_rank(result: dict[str, Any]) -> tuple[int, int]:
-    decision = str(result.get("decision") or "ALLOW").upper()
-    label = str(result.get("primary_label") or "SAFE").upper()
-    decision_rank = 100 if decision == "BLOCK" else 0
-    label_rank = LABEL_PRIORITY.get(label, 10)
-    return decision_rank + label_rank, label_rank
+    return taxonomy.rank(
+        result.get("decision") or taxonomy.ALLOW,
+        result.get("primary_label") or "SAFE",
+    )
 
 
 def merge_results(original: dict[str, Any], normalized: dict[str, Any] | None, normalization: dict[str, Any]) -> dict[str, Any]:
@@ -327,58 +319,42 @@ def golden_eval_snapshot() -> dict[str, Any]:
             last_progress = {"done": int(match.group("done")), "total": int(match.group("total"))}
             break
 
-    decision_correct = 0
-    primary_label_correct = 0
-    false_positives = 0
-    false_negatives = 0
-    safe_seen = 0
-    block_seen = 0
+    reporte = metrics.Report()
     expected_counts: dict[str, int] = {}
     predicted_counts: dict[str, int] = {}
-    confusion: dict[str, int] = {}
     decision_counts: dict[str, int] = {}
 
     for row in predictions:
         expected = row.get("expected") or {}
         prediction = row.get("prediction") or {}
-        expected_decision = expected.get("expected_decision") or "UNKNOWN"
-        expected_label = expected.get("expected_primary_label") or "UNKNOWN"
-        predicted_decision = prediction.get("decision") or "INVALID"
-        predicted_label = prediction.get("primary_label") or "INVALID"
+        if not expected.get("expected_decision"):
+            continue
+        observacion = metrics.observation_from(
+            expected, prediction, group_id=str(row.get("group_id") or "")
+        )
+        reporte.add(observacion)
+        expected_counts[observacion.expected_label] = (
+            expected_counts.get(observacion.expected_label, 0) + 1
+        )
+        predicted_counts[observacion.predicted_label] = (
+            predicted_counts.get(observacion.predicted_label, 0) + 1
+        )
+        decision_counts[observacion.predicted_decision] = (
+            decision_counts.get(observacion.predicted_decision, 0) + 1
+        )
 
-        expected_counts[expected_label] = expected_counts.get(expected_label, 0) + 1
-        predicted_counts[predicted_label] = predicted_counts.get(predicted_label, 0) + 1
-        decision_counts[predicted_decision] = decision_counts.get(predicted_decision, 0) + 1
-        confusion_key = f"{expected_label}->{predicted_label}"
-        confusion[confusion_key] = confusion.get(confusion_key, 0) + 1
-
-        if expected_decision == predicted_decision:
-            decision_correct += 1
-        if expected_label == predicted_label:
-            primary_label_correct += 1
-        if expected_decision == "ALLOW":
-            safe_seen += 1
-            if predicted_decision != "ALLOW":
-                false_positives += 1
-        else:
-            block_seen += 1
-            if predicted_decision != "BLOCK":
-                false_negatives += 1
+    safe_seen = sum(1 for o in reporte.observations if o.expected_decision == taxonomy.ALLOW)
+    block_seen = sum(1 for o in reporte.observations if o.expected_decision == taxonomy.BLOCK)
+    confusion = (
+        reporte.as_dict().get("primary_label", {}).get("confusion", {})
+        if reporte.observations
+        else {}
+    )
 
     percent = round((done / total) * 100, 2) if total else 0
     status = "finished" if final_metrics else ("running" if process.get("running") else "idle")
-    metrics = final_metrics or {
-        "total": done,
-        "decision_correct": decision_correct,
-        "primary_label_correct": primary_label_correct,
-        "false_positives": false_positives,
-        "false_negatives": false_negatives,
-        "decision_accuracy": decision_correct / done if done else None,
-        "primary_label_accuracy": primary_label_correct / done if done else None,
-        "false_positive_rate": false_positives / safe_seen if safe_seen else None,
-        "false_negative_rate": false_negatives / block_seen if block_seen else None,
-        "label_confusion": confusion,
-    }
+    parciales = reporte.as_dict() if reporte.observations else {"total": 0}
+    metricas = final_metrics or parciales
 
     top_confusions = sorted(
         [{"pair": key, "count": value} for key, value in confusion.items()],
@@ -410,7 +386,7 @@ def golden_eval_snapshot() -> dict[str, Any]:
         "percent": percent,
         "progress": last_progress,
         "process": process,
-        "metrics": metrics,
+        "metrics": metricas,
         "safe_seen": safe_seen,
         "block_seen": block_seen,
         "expected_counts": expected_counts,

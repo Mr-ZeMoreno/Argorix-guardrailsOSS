@@ -149,7 +149,6 @@ ignore = [
 ]
 "src/guardrails/data/corrective.py" = ["I001", "C420", "RUF046"]
 "src/guardrails/evaluation/golden_set.py" = ["I001"]
-"src/guardrails/evaluation/run_eval.py" = ["I001"]
 "src/guardrails/publishing/publish_hf.py" = ["I001"]
 "src/guardrails/training/qlora.py" = [
     "I001",
@@ -159,7 +158,6 @@ ignore = [
     "ARG002",
 ]
 "src/guardrails/serving/backend.py" = [
-    "I001",
     # B905: zip() sin strict= en normalize_for_guardrail(). Ambos iterables
     # tienen la misma longitud porque LEET_TRANSLATION mapea carácter a
     # carácter, pero la garantía es implícita.
@@ -186,7 +184,6 @@ exclude = [
     "src/guardrails/data/build_dataset.py",
     "src/guardrails/data/corrective.py",
     "src/guardrails/data/translate.py",
-    "src/guardrails/evaluation/run_eval.py",
     "src/guardrails/serving/backend.py",
     "src/guardrails/serving/worker.py",
 ]

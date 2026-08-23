@@ -1,14 +1,38 @@
+"""Evaluación de un adaptador guardrail.
+
+Recorre un conjunto de casos, genera la clasificación para cada uno y agrega
+los resultados con :mod:`guardrails.evaluation.metrics`, que es la única
+implementación de métricas del proyecto.
+
+Cada fila se conserva como una observación independiente: nada se colapsa por
+texto, de modo que los conteos y los denominadores provienen siempre del mismo
+conjunto. Las salidas que no se pueden parsear se registran como ``INVALID`` y
+cuentan como error, no se descartan.
+
+Junto a las métricas se persiste un bloque ``run_metadata`` con el commit, el
+comando, el adaptador y las versiones de biblioteca, para que un resultado
+pueda reproducirse.
+"""
+
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import platform
+import subprocess
+import sys
+import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import Any
 
 import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from guardrails.evaluation import metrics
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_ADAPTER = "models/guardrail-qwen25-1_5b-qlora"
@@ -33,76 +57,183 @@ def build_prompt(text: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evalua manualmente el adapter guardrail.")
+    parser = argparse.ArgumentParser(description="Evalúa un adaptador guardrail.")
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     parser.add_argument("--adapter", type=Path, default=Path(DEFAULT_ADAPTER))
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--text", action="append", default=None)
     parser.add_argument("--input-file", type=Path, default=None)
     parser.add_argument("--input-csv", type=Path, default=None)
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Parquet de evaluación; se usa junto con --split.",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Partición a evaluar cuando se pasa --dataset.",
+    )
+    parser.add_argument("--limit", type=int, default=None, help="Evalúa como mucho N casos.")
     parser.add_argument("--output-jsonl", type=Path, default=None)
     parser.add_argument("--metrics-output", type=Path, default=None)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument("--load-4bit", action="store_true")
+    parser.add_argument(
+        "--cost-false-positive",
+        type=float,
+        default=1.0,
+        help="Peso de un falso positivo en la función de costo.",
+    )
+    parser.add_argument(
+        "--cost-false-negative",
+        type=float,
+        default=1.0,
+        help="Peso de un falso negativo en la función de costo.",
+    )
+    parser.add_argument(
+        "--arrival-rate-block",
+        type=float,
+        default=None,
+        help="Proporción de tráfico real que debería bloquearse; habilita el costo esperado por petición.",
+    )
     return parser.parse_args()
 
 
 def extract_json(generated: str) -> dict:
+    """Extrae el primer objeto JSON de la salida generada."""
     json_start = generated.index("{")
     json_end = generated.rindex("}") + 1
     return json.loads(generated[json_start:json_end])
 
 
-def update_metrics(metrics: dict, expected: dict | None, predicted: dict) -> None:
-    if expected is None:
-        return
+# ---------------------------------------------------------------------------
+# Carga de casos
+# ---------------------------------------------------------------------------
 
-    metrics["total"] += 1
-    expected_decision = expected["expected_decision"]
-    predicted_decision = str(predicted.get("decision", "")).upper()
-    expected_label = expected["expected_primary_label"]
-    predicted_label = str(predicted.get("primary_label", "")).upper()
 
-    if predicted_decision == expected_decision:
-        metrics["decision_correct"] += 1
-    if predicted_label == expected_label:
-        metrics["primary_label_correct"] += 1
+def _cases_from_csv(path: Path) -> list[dict[str, str]]:
+    """Cada fila del CSV es un caso; no se colapsan textos repetidos."""
+    casos: list[dict[str, str]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            texto = row["text"].strip()
+            if not texto:
+                continue
+            casos.append(
+                {
+                    "text": texto,
+                    "expected_decision": row["expected_decision"].strip().upper(),
+                    "expected_primary_label": row["expected_primary_label"].strip().upper(),
+                    "group_id": (row.get("group_id") or "").strip(),
+                }
+            )
+    return casos
 
-    if expected_decision == "ALLOW" and predicted_decision == "BLOCK":
-        metrics["false_positives"] += 1
-    if expected_decision == "BLOCK" and predicted_decision == "ALLOW":
-        metrics["false_negatives"] += 1
 
-    key = f"{expected_label}->{predicted_label or 'INVALID'}"
-    metrics["label_confusion"][key] = metrics["label_confusion"].get(key, 0) + 1
+def _cases_from_dataset(path: Path, split: str) -> list[dict[str, str]]:
+    """Casos a partir de una partición del parquet de fine-tuning."""
+    import pandas as pd
+
+    df = pd.read_parquet(path)
+    if "split" not in df.columns:
+        raise ValueError(f"{path} no tiene columna 'split'")
+    subset = df[df["split"] == split]
+    if subset.empty:
+        raise ValueError(f"{path} no tiene filas con split == {split!r}")
+    return [
+        {
+            "text": str(row.text_es),
+            "expected_decision": str(row.decision).upper(),
+            "expected_primary_label": str(row.primary_label).upper(),
+            "group_id": str(getattr(row, "group_id", "") or getattr(row, "parent_id", "") or ""),
+        }
+        for row in subset.itertuples()
+    ]
+
+
+def load_cases(args: argparse.Namespace) -> list[dict[str, str]]:
+    """Casos a evaluar, en orden y sin deduplicar."""
+    casos: list[dict[str, str]] = []
+    for texto in args.text or []:
+        casos.append({"text": texto, "expected_decision": "", "expected_primary_label": "", "group_id": ""})
+    if args.input_file is not None:
+        for linea in args.input_file.read_text(encoding="utf-8").splitlines():
+            if linea.strip():
+                casos.append(
+                    {
+                        "text": linea.strip(),
+                        "expected_decision": "",
+                        "expected_primary_label": "",
+                        "group_id": "",
+                    }
+                )
+    if args.input_csv is not None:
+        casos.extend(_cases_from_csv(args.input_csv))
+    if args.dataset is not None:
+        casos.extend(_cases_from_dataset(args.dataset, args.split))
+    if not casos:
+        casos = [
+            {"text": t, "expected_decision": "", "expected_primary_label": "", "group_id": ""}
+            for t in EXAMPLES
+        ]
+    if args.limit is not None:
+        casos = casos[: args.limit]
+    return casos
+
+
+# ---------------------------------------------------------------------------
+# Metadatos de ejecución
+# ---------------------------------------------------------------------------
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return pkg_version(name)
+    except PackageNotFoundError:
+        return None
+
+
+def run_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    """Contexto necesario para reproducir la ejecución."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = ""
+    return {
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "commit": commit,
+        "command": " ".join(sys.argv),
+        "adapter": str(args.adapter),
+        "base_model": args.base_model,
+        "load_4bit": bool(args.load_4bit),
+        "max_new_tokens": args.max_new_tokens,
+        "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "python": sys.version.split()[0],
+        "cuda_available": bool(torch.cuda.is_available()),
+        "versions": {
+            name: _package_version(name)
+            for name in ("torch", "transformers", "peft", "trl", "accelerate", "bitsandbytes")
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Evaluación
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
     args = parse_args()
-    texts = args.text or []
-    expected_by_text: dict[str, dict[str, str]] = {}
-    if args.input_file is not None:
-        file_texts = [
-            line.strip()
-            for line in args.input_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        texts.extend(file_texts)
-    if args.input_csv is not None:
-        with args.input_csv.open("r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                text = row["text"].strip()
-                if not text:
-                    continue
-                texts.append(text)
-                expected_by_text[text] = {
-                    "expected_decision": row["expected_decision"].strip().upper(),
-                    "expected_primary_label": row["expected_primary_label"].strip().upper(),
-                }
-    if not texts:
-        texts = EXAMPLES
+    casos = load_cases(args)
 
     tokenizer = AutoTokenizer.from_pretrained(args.adapter if args.adapter.exists() else args.base_model)
     if tokenizer.pad_token is None:
@@ -131,19 +262,21 @@ def main() -> None:
         args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
         output_handle = args.output_jsonl.open("w", encoding="utf-8")
 
-    metrics = {
-        "total": 0,
-        "decision_correct": 0,
-        "primary_label_correct": 0,
-        "false_positives": 0,
-        "false_negatives": 0,
-        "label_confusion": {},
-    }
+    reporte = metrics.Report(
+        cost_model=metrics.CostModel(
+            false_positive=args.cost_false_positive,
+            false_negative=args.cost_false_negative,
+            arrival_rate_block=args.arrival_rate_block,
+        )
+    )
 
-    total_texts = len(texts)
-    for index, text in enumerate(texts, start=1):
-        prompt = build_prompt(text)
+    total_casos = len(casos)
+    for index, caso in enumerate(casos, start=1):
+        texto = caso["text"]
+        prompt = build_prompt(texto)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+        started = time.perf_counter()
         with torch.inference_mode():
             output = model.generate(
                 **inputs,
@@ -152,32 +285,47 @@ def main() -> None:
                 temperature=None,
                 top_p=None,
                 pad_token_id=tokenizer.eos_token_id,
-        )
+            )
+        latency_ms = (time.perf_counter() - started) * 1000
+
         generated = tokenizer.decode(output[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
-        parsed = None
-        if not args.quiet:
-            print("=" * 80)
-            print(text)
-            print(generated.strip())
         try:
             parsed = extract_json(generated)
-            if not args.quiet:
-                print(json.dumps(parsed, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+        except (ValueError, json.JSONDecodeError):
+            parsed = None
 
-        expected = expected_by_text.get(text)
-        if expected is not None:
-            update_metrics(metrics, expected, parsed or {})
+        if not args.quiet:
+            print("=" * 80)
+            print(texto)
+            print(generated.strip())
+
+        if caso["expected_decision"]:
+            reporte.add(
+                metrics.observation_from(
+                    caso,
+                    parsed,
+                    group_id=caso.get("group_id", ""),
+                    latency_ms=latency_ms,
+                )
+            )
 
         if output_handle is not None:
             output_handle.write(
                 json.dumps(
                     {
-                        "text": text,
-                        "expected": expected,
+                        "text": texto,
+                        "group_id": caso.get("group_id", ""),
+                        "expected": (
+                            {
+                                "expected_decision": caso["expected_decision"],
+                                "expected_primary_label": caso["expected_primary_label"],
+                            }
+                            if caso["expected_decision"]
+                            else None
+                        ),
                         "prediction": parsed,
                         "raw": generated.strip(),
+                        "latency_ms": round(latency_ms, 2),
                     },
                     ensure_ascii=False,
                 )
@@ -186,26 +334,22 @@ def main() -> None:
             output_handle.flush()
 
         if args.progress_every > 0 and (index == 1 or index % args.progress_every == 0):
-            print(f"eval_progress {index}/{total_texts}", flush=True)
+            print(f"eval_progress {index}/{total_casos}", flush=True)
 
     if output_handle is not None:
         output_handle.close()
 
-    if metrics["total"]:
-        metrics["decision_accuracy"] = metrics["decision_correct"] / metrics["total"]
-        metrics["primary_label_accuracy"] = metrics["primary_label_correct"] / metrics["total"]
-        allow_total = sum(1 for item in expected_by_text.values() if item["expected_decision"] == "ALLOW")
-        block_total = sum(1 for item in expected_by_text.values() if item["expected_decision"] == "BLOCK")
-        metrics["false_positive_rate"] = metrics["false_positives"] / allow_total if allow_total else 0
-        metrics["false_negative_rate"] = metrics["false_negatives"] / block_total if block_total else 0
+    if reporte.observations:
+        resultado = {"run_metadata": run_metadata(args), **reporte.as_dict()}
         print("=" * 80)
-        print(json.dumps(metrics, indent=2, ensure_ascii=False))
+        print(json.dumps(resultado, indent=2, ensure_ascii=False))
         if args.metrics_output is not None:
             args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
             args.metrics_output.write_text(
-                json.dumps(metrics, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+                json.dumps(resultado, indent=2, ensure_ascii=False), encoding="utf-8"
             )
+    else:
+        print("Sin casos etiquetados: no se calcularon métricas.")
 
 
 if __name__ == "__main__":

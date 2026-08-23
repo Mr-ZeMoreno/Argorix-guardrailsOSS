@@ -33,6 +33,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from guardrails.evaluation import metrics
+from guardrails.serving import normalization
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_ADAPTER = "models/guardrail-qwen25-1_5b-qlora"
@@ -92,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Peso de un falso negativo en la función de costo.",
+    )
+    parser.add_argument(
+        "--production-path",
+        action="store_true",
+        help=(
+            "Evalúa la ruta completa de producción: normaliza la entrada, consulta al modelo "
+            "una segunda vez si la normalización cambió el texto, y arbitra por severidad. "
+            "Sin esta bandera se mide el modelo aislado, que bloquea menos."
+        ),
     )
     parser.add_argument(
         "--arrival-rate-block",
@@ -215,6 +225,7 @@ def run_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "adapter": str(args.adapter),
         "base_model": args.base_model,
         "load_4bit": bool(args.load_4bit),
+        "production_path": bool(getattr(args, "production_path", False)),
         "max_new_tokens": args.max_new_tokens,
         "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
         "python": sys.version.split()[0],
@@ -270,13 +281,10 @@ def main() -> None:
         )
     )
 
-    total_casos = len(casos)
-    for index, caso in enumerate(casos, start=1):
-        texto = caso["text"]
+    def clasificar(texto: str) -> tuple[dict[str, Any] | None, str]:
+        """Una inferencia: devuelve el JSON parseado y la salida cruda."""
         prompt = build_prompt(texto)
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-        started = time.perf_counter()
         with torch.inference_mode():
             output = model.generate(
                 **inputs,
@@ -286,13 +294,35 @@ def main() -> None:
                 top_p=None,
                 pad_token_id=tokenizer.eos_token_id,
             )
-        latency_ms = (time.perf_counter() - started) * 1000
-
-        generated = tokenizer.decode(output[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
+        crudo = tokenizer.decode(output[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         try:
-            parsed = extract_json(generated)
+            return extract_json(crudo), crudo
         except (ValueError, json.JSONDecodeError):
-            parsed = None
+            return None, crudo
+
+    total_casos = len(casos)
+    for index, caso in enumerate(casos, start=1):
+        texto = caso["text"]
+
+        started = time.perf_counter()
+        parsed, generated = clasificar(texto)
+        inferencias = 1
+
+        if args.production_path:
+            # Misma lógica que la consola de gobernanza: normalizar, reconsultar
+            # si el texto cambió y quedarse con el resultado de mayor severidad.
+            norm = normalization.normalize_for_guardrail(texto)
+            if norm["changed"] and norm["score"] > 0:
+                parsed_norm, _ = clasificar(norm["text"])
+                inferencias = 2
+                if parsed_norm is not None:
+                    fusionado = normalization.merge_results(parsed or {}, parsed_norm, norm)
+                    if fusionado.get("decision"):
+                        parsed = {
+                            "decision": fusionado.get("decision"),
+                            "primary_label": fusionado.get("primary_label"),
+                        }
+        latency_ms = (time.perf_counter() - started) * 1000
 
         if not args.quiet:
             print("=" * 80)
@@ -326,6 +356,7 @@ def main() -> None:
                         "prediction": parsed,
                         "raw": generated.strip(),
                         "latency_ms": round(latency_ms, 2),
+                        "inferences": inferencias,
                     },
                     ensure_ascii=False,
                 )

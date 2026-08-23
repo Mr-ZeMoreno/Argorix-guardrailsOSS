@@ -72,12 +72,17 @@ def test_el_dano_fisico_pesa_mas_que_el_tipo_de_ataque() -> None:
 
 
 def test_hay_una_sola_definicion_del_orden() -> None:
-    """Los tres puntos del código importan la severidad del mismo módulo."""
-    from guardrails.serving import backend
+    """Datos, runtime y conjunto de evaluación importan la severidad del mismo módulo."""
+    from guardrails.evaluation import golden_set
+    from guardrails.serving import normalization
 
-    assert backend.LABEL_PRIORITY is taxonomy.SEVERITY
-    assert bd.primary_label is not None
+    assert normalization.LABEL_PRIORITY is taxonomy.SEVERITY
+    assert normalization.result_rank({"decision": "BLOCK", "primary_label": "VIOLENCE"}) == (
+        taxonomy.rank("BLOCK", "VIOLENCE")
+    )
     assert bd.LABEL_COLUMNS is taxonomy.COLUMNS
+    # El generador del conjunto deriva la decisión de la taxonomía, no de listas fijas.
+    assert golden_set.taxonomy is taxonomy
 
 
 def test_normalize_recalcula_label_safe() -> None:

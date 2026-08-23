@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from guardrails import paths, taxonomy
+from guardrails import paths
 from guardrails.evaluation import metrics
 
 
@@ -209,10 +209,12 @@ def test_los_pesos_por_defecto_se_declaran_como_marcador() -> None:
 
 
 def test_backend_y_evaluador_usan_el_mismo_modulo() -> None:
+    """Una sola implementación de métricas para el panel y para el evaluador."""
+    from guardrails.evaluation import run_eval
     from guardrails.serving import backend
 
     assert backend.metrics is metrics
-    assert backend.LABEL_PRIORITY is taxonomy.SEVERITY
+    assert run_eval.metrics is metrics
 
 
 def test_metricas_publicadas_son_coherentes_con_los_conteos() -> None:

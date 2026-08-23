@@ -141,21 +141,12 @@ ignore = [
 "src/guardrails/data/ingest.py" = ["I001"]
 "src/guardrails/data/translate.py" = ["I001"]
 "src/guardrails/publishing/publish_hf.py" = ["I001"]
-"src/guardrails/training/qlora.py" = [
-    "I001",
-    # ARG002: SaveStateCallback implementa la interfaz TrainerCallback de
-    # transformers, que fija la firma (args, state, control, **kwargs).
-    # Los argumentos sin usar son parte del contrato, no un descuido.
-    "ARG002",
-]
-"src/guardrails/serving/backend.py" = [
-    # B905: zip() sin strict= en normalize_for_guardrail(). Ambos iterables
-    # tienen la misma longitud porque LEET_TRANSLATION mapea carácter a
-    # carácter, pero la garantía es implícita.
-    "B905",
-    # SIM105: try/except/pass en el drenaje de stderr del worker.
-    "SIM105",
-]
+# ARG002: SaveStateCallback implementa la interfaz TrainerCallback de
+# transformers, que fija la firma (args, state, control, **kwargs).
+# Los argumentos sin usar son parte del contrato, no un descuido.
+"src/guardrails/training/qlora.py" = ["ARG002"]
+# SIM105: try/except/pass en el drenaje de stderr del worker.
+"src/guardrails/serving/backend.py" = ["SIM105"]
 
 # Los tests de caracterización usan firmas impuestas por pytest, y
 # tests/conftest.py define sustitutos de dependencias pesadas cuyas firmas

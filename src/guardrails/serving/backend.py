@@ -7,7 +7,6 @@ import re
 import subprocess
 import threading
 import time
-import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,10 @@ from pydantic import BaseModel, Field
 
 from guardrails import paths, taxonomy
 from guardrails.evaluation import metrics
+from guardrails.serving.normalization import (
+    merge_results,
+    normalize_for_guardrail,
+)
 
 ROOT = paths.PROJECT_ROOT
 APP_DIR = paths.STATIC_DIR.parent
@@ -67,30 +70,6 @@ TRAIN_PROGRESS_RE = re.compile(
     r"\[(?P<elapsed>[^<\]]+)(?:<(?P<eta>[^,\]]+))?"
 )
 EVAL_PROGRESS_RE = re.compile(r"eval_progress\s+(?P<done>\d+)/(?P<total>\d+)")
-LEET_TRANSLATION = str.maketrans(
-    {
-        "0": "o",
-        "1": "i",
-        "3": "e",
-        "4": "a",
-        "5": "s",
-        "6": "g",
-        "7": "t",
-        "8": "b",
-        "@": "a",
-        "$": "s",
-        "!": "i",
-        "€": "e",
-        "|": "i",
-    }
-)
-SPLIT_JOIN_RE = re.compile(r"(?<=\w)[\.\-_~`'\"\\\/]+(?=\w)")
-LETTER_SPACED_RE = re.compile(r"\b(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ]\s+){2,}[a-zA-ZáéíóúñÁÉÍÓÚÑ]\b")
-# El orden de severidad vive en guardrails.taxonomy, que es también el que usa
-# la generación de datos y el generador del conjunto de evaluación.
-LABEL_PRIORITY = taxonomy.SEVERITY
-
-
 def select_default_adapter() -> str:
     configured = os.environ.get("GUARDRAIL_ADAPTER")
     if configured:
@@ -113,58 +92,6 @@ DEFAULT_ADAPTER = select_default_adapter()
 def wsl_project_path(path: Path) -> str:
     relative = path.resolve().relative_to(ROOT.resolve())
     return f"{DEFAULT_PROJECT}/{relative.as_posix()}"
-
-
-def join_spaced_letters(match: re.Match[str]) -> str:
-    return match.group(0).replace(" ", "")
-
-
-def normalize_for_guardrail(text: str) -> dict[str, Any]:
-    ascii_text = unicodedata.normalize("NFKC", text)
-    replaced = sum(1 for a, b in zip(ascii_text, ascii_text.translate(LEET_TRANSLATION)) if a != b)
-    normalized = ascii_text.translate(LEET_TRANSLATION)
-    separator_hits = len(SPLIT_JOIN_RE.findall(normalized))
-    normalized = SPLIT_JOIN_RE.sub("", normalized)
-    spaced_hits = len(LETTER_SPACED_RE.findall(normalized))
-    normalized = LETTER_SPACED_RE.sub(join_spaced_letters, normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return {
-        "text": normalized,
-        "changed": normalized != text,
-        "replacements": replaced,
-        "separator_hits": separator_hits,
-        "spaced_hits": spaced_hits,
-        "score": replaced + separator_hits + spaced_hits,
-    }
-
-
-def result_rank(result: dict[str, Any]) -> tuple[int, int]:
-    return taxonomy.rank(
-        result.get("decision") or taxonomy.ALLOW,
-        result.get("primary_label") or "SAFE",
-    )
-
-
-def merge_results(original: dict[str, Any], normalized: dict[str, Any] | None, normalization: dict[str, Any]) -> dict[str, Any]:
-    final = dict(original)
-    final["analysis_mode"] = "original"
-    final["normalization"] = normalization
-    final["variants"] = {"original": original}
-    if not normalized:
-        return final
-
-    final["variants"]["normalized"] = normalized
-    if not normalization.get("changed") or normalization.get("score", 0) <= 0:
-        return final
-
-    original_rank = result_rank(original)
-    normalized_rank = result_rank(normalized)
-    if normalized_rank > original_rank:
-        final = dict(normalized)
-        final["analysis_mode"] = "normalized_override"
-    final["normalization"] = normalization
-    final["variants"] = {"original": original, "normalized": normalized}
-    return final
 
 
 def tail_lines(path: Path, limit: int = 80) -> list[str]:

@@ -1,3 +1,15 @@
+"""Fine-tuning QLoRA del guardrail.
+
+El campo ``sft_text`` contiene instrucción, texto de usuario y JSON objetivo.
+La pérdida se calcula **sólo sobre el completado** —el JSON—, no sobre toda la
+secuencia: entrenar sobre el prompt gasta la mayor parte de la señal en enseñar
+al modelo a reproducir la entrada, que no es lo que se le pide en inferencia.
+
+Se guarda el mejor punto de control según la pérdida de validación, no el
+último paso, y se registran los identificadores de las filas efectivamente
+consumidas, para poder reconstruir después qué vio el modelo.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -14,7 +26,6 @@ from transformers import (
     TrainerCallback,
 )
 from trl import SFTConfig, SFTTrainer
-
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
@@ -56,6 +67,17 @@ class SaveStateCallback(TrainerCallback):
         )
 
 
+#: Marca a partir de la cual empieza el completado dentro de ``sft_text``.
+COMPLETION_MARKER = "<start_of_turn>model\n"
+
+
+def consumed_ids(dataset) -> list[str]:
+    """Identificadores de las filas que el entrenamiento consumió."""
+    if "id" not in dataset.column_names:
+        return []
+    return list(dataset["id"])
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fine-tune Qwen/Gemma style guardrail with QLoRA over sft_text."
@@ -80,12 +102,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--merge", action="store_true")
+    parser.add_argument(
+        "--no-best-model",
+        dest="load_best_model",
+        action="store_false",
+        help="Conserva el último punto de control en vez del de menor pérdida de validación.",
+    )
+    parser.set_defaults(load_best_model=True)
     return parser.parse_args()
 
 
 def load_sft_splits(dataset_path: Path, max_train: int | None, max_eval: int | None, seed: int):
+    """Particiones de entrenamiento y validación, ya barajadas y recortadas."""
     dataset = load_dataset("parquet", data_files=str(dataset_path), split="train")
-    keep_columns = {"sft_text", "split", "primary_label", "decision"}
+    keep_columns = {"sft_text", "split", "primary_label", "decision", "id", "group_id"}
     remove_columns = [column for column in dataset.column_names if column not in keep_columns]
     dataset = dataset.remove_columns(remove_columns)
 
@@ -196,6 +226,15 @@ def main() -> None:
         dataset_text_field="sft_text",
         packing=False,
         seed=args.seed,
+        # La pérdida se calcula sólo sobre el JSON de salida. Sin esto, la mayor
+        # parte de la señal enseña a reproducir el prompt.
+        completion_only_loss=True,
+        # Se conserva el punto de control con menor pérdida de validación, no el
+        # del último paso.
+        load_best_model_at_end=args.load_best_model,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        save_strategy="steps",
     )
 
     trainer = SFTTrainer(
@@ -212,6 +251,16 @@ def main() -> None:
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(str(args.output_dir))
 
+    # Qué filas vio realmente el modelo. Con --max-steps el entrenamiento corta
+    # antes de completar una época, así que el dataset no basta para saberlo.
+    ids_train = consumed_ids(train_ds)
+    ids_eval = consumed_ids(eval_ds)
+    if ids_train:
+        (args.output_dir / "consumed_ids.json").write_text(
+            json.dumps({"train": ids_train, "validation": ids_eval}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     metadata = {
         "base_model": args.model,
         "adapter_init": str(args.adapter_init) if args.adapter_init else None,
@@ -219,6 +268,12 @@ def main() -> None:
         "max_length": args.max_length,
         "train_rows": len(train_ds),
         "eval_rows": len(eval_ds),
+        "seed": args.seed,
+        "max_steps": args.max_steps,
+        "effective_batch_size": args.train_batch_size * args.gradient_accumulation_steps,
+        "completion_only_loss": True,
+        "load_best_model_at_end": args.load_best_model,
+        "consumed_ids_file": "consumed_ids.json" if ids_train else None,
         "type": "qlora_adapter",
     }
     (args.output_dir / "guardrail_training.json").write_text(

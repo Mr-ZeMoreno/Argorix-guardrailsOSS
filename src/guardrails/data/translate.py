@@ -16,6 +16,10 @@ from transformers.utils import logging as hf_logging
 
 
 DEFAULT_MODEL = "facebook/nllb-200-distilled-600M"
+
+#: Cuántos textos se truncaron al traducir. Se registra en dataset_info.json:
+#: el fragmento conservado puede no justificar ya la etiqueta heredada.
+TRUNCATION_STATS: dict[str, int] = {"total": 0, "truncated": 0}
 TARGET_LANG = "spa_Latn"
 hf_logging.set_verbosity_error()
 
@@ -262,6 +266,14 @@ def translate_texts(
     if hasattr(tokenizer, "src_lang"):
         tokenizer.src_lang = src_lang
 
+    sin_truncar = tokenizer(texts, padding=False, truncation=False)["input_ids"]
+    truncados = sum(1 for ids in sin_truncar if len(ids) > max_input_tokens)
+    if truncados:
+        # El texto se trunca pero la etiqueta viene del original completo: puede
+        # dejar de estar justificada por el fragmento que sobrevive.
+        TRUNCATION_STATS["truncated"] += truncados
+    TRUNCATION_STATS["total"] += len(texts)
+
     inputs = tokenizer(
         texts,
         return_tensors="pt",
@@ -411,6 +423,13 @@ def translate_job(
         result[f"{column}_es"] = translated_values
     result.to_parquet(job.output_path, index=False)
 
+    if TRUNCATION_STATS["truncated"]:
+        print(
+            f"Aviso: {TRUNCATION_STATS['truncated']} de {TRUNCATION_STATS['total']} textos se "
+            f"truncaron a {max_input_tokens} tokens al traducir; la etiqueta procede del "
+            f"texto completo."
+        )
+
     metadata_path = job.output_path.parent / "dataset_info.json"
     metadata = {
         "source": str(job.input_path),
@@ -420,6 +439,11 @@ def translate_job(
         "translated_columns": [f"{column}_es" for column in job.text_columns],
         "target_language": TARGET_LANG,
         "model": model_name,
+        "max_input_tokens": max_input_tokens,
+        "truncation": dict(TRUNCATION_STATS),
+        "fallback_to_original": int((result[f"{job.text_columns[0]}_es"] == "").sum())
+        if f"{job.text_columns[0]}_es" in result
+        else 0,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 

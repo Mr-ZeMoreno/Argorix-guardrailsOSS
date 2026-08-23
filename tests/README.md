@@ -1,7 +1,7 @@
 # `tests/` — batería de pruebas
 
 ```bash
-uv run pytest                       # 98 tests, < 5 s, sin GPU ni red
+uv run pytest                       # 104 tests, < 5 s, sin GPU ni red
 uv run pytest -m characterization   # sólo los de caracterización
 ```
 
@@ -14,6 +14,7 @@ que la batería corre con `uv sync --group dev` y también en una máquina con l
 | Archivo | Qué cubre |
 |---|---|
 | `test_taxonomy.py` | Orden de severidad, resolución multi-clase y política de decisión |
+| `test_labeling.py` | Qué texto se clasifica y con qué etiqueta según el origen |
 | `test_splits.py` | Determinismo, proporciones configurables y agrupación de derivaciones |
 | `test_deduplication.py` | Textos repetidos y conflictos de etiqueta entre orígenes |
 | `test_corrective_dataset.py` | Separación entre el conjunto de corrección y el de medición |
@@ -34,6 +35,12 @@ Estos son los que conviene no romper:
 - Las tasas de error están acotadas en `[0, 1]` sea cual sea la entrada.
 - Una salida que no se puede parsear cuenta como error.
 - Datos, runtime y generador del conjunto importan la severidad del mismo módulo.
+- Sólo se clasifica texto de entrada de usuario; la respuesta del modelo no hereda la etiqueta
+  del prompt salvo que se pida explícitamente.
+
+La integración continua (`.github/workflows/ci.yml`) ejecuta lint, formato, batería y CLI en
+**Ubuntu y Windows**, en Python 3.11 y 3.12, y comprueba que `uv.lock` corresponde a
+`pyproject.toml`.
 
 ## Tests de caracterización
 

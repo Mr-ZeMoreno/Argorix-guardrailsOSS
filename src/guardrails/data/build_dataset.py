@@ -16,6 +16,12 @@ from guardrails.data import splits
 #: Alias del esquema canónico. La definición vive en guardrails.taxonomy.
 LABEL_COLUMNS = taxonomy.COLUMNS
 
+#: Roles de texto que son ENTRADA DE USUARIO y por tanto lo que el guardrail
+#: clasifica en inferencia. Las funciones de etiquetado describen la intención
+#: del prompt; aplicarlas a la respuesta del modelo etiqueta como JAILBREAK a
+#: un texto que no lo es.
+USER_INPUT_ROLES = frozenset({"text", "prompt", "base_prompt"})
+
 MUTATION_RULES = (
     (
         re.compile(r"\bignora las instrucciones anteriores\b", re.IGNORECASE),
@@ -242,11 +248,16 @@ def add_text_records(
     label_fn,
     max_chars: int,
     split_config: splits.SplitConfig = splits.DEFAULT,
+    include_non_user_roles: bool = False,
 ) -> None:
     for source_row, row in df.iterrows():
         labels = label_fn(row)
         row_language = clean_text(row.get("language", original_language), 24) or original_language
         for original_column, translated_column in text_pairs:
+            if not include_non_user_roles and original_column not in USER_INPUT_ROLES:
+                # La etiqueta describe la intención del prompt, no el contenido
+                # de la respuesta: heredarla introduce ruido sistemático.
+                continue
             original_text = clean_text(row.get(original_column), max_chars)
             text_es = clean_text(row.get(translated_column), max_chars) or original_text
             if not text_es:
@@ -456,6 +467,7 @@ def load_records(
     limit_per_source: int | None,
     *,
     split_config: splits.SplitConfig = splits.DEFAULT,
+    include_non_user_roles: bool = False,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
 
@@ -475,6 +487,7 @@ def load_records(
                 label_fn=labels_guardrails,
                 max_chars=max_chars,
                 split_config=split_config,
+                include_non_user_roles=include_non_user_roles,
             )
 
     necent_path = translated_dir / "Necent__llm-jailbreak-prompt-injection-dataset" / "train.parquet"
@@ -492,6 +505,7 @@ def load_records(
             label_fn=labels_necent,
             max_chars=max_chars,
             split_config=split_config,
+            include_non_user_roles=include_non_user_roles,
         )
 
     j1n2_path = translated_dir / "J1N2__mix-prompt-injection-dataset" / "train.parquet"
@@ -509,6 +523,7 @@ def load_records(
             label_fn=labels_j1n2,
             max_chars=max_chars,
             split_config=split_config,
+            include_non_user_roles=include_non_user_roles,
         )
 
     bogdanminko_path = (
@@ -528,6 +543,7 @@ def load_records(
             label_fn=labels_bogdanminko,
             max_chars=max_chars,
             split_config=split_config,
+            include_non_user_roles=include_non_user_roles,
         )
 
     return records
@@ -551,6 +567,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-validation", type=int, default=10, help="Porcentaje de validation.")
     parser.add_argument("--split-test", type=int, default=10, help="Porcentaje de test.")
     parser.add_argument(
+        "--include-non-user-roles",
+        action="store_true",
+        help=(
+            "Incluye columnas que no son entrada de usuario (por ejemplo `response`). "
+            "Esas filas heredan la etiqueta del prompt, que describe su intención, no su "
+            "contenido. Desactivado por defecto."
+        ),
+    )
+    parser.add_argument(
         "--split-salt",
         default="",
         help="Sal de la partición: cambiarla rota el reparto sin tocar los datos.",
@@ -567,7 +592,11 @@ def main() -> None:
         salt=args.split_salt,
     )
     records = load_records(
-        args.translated_dir, args.max_chars, args.limit_per_source, split_config=split_config
+        args.translated_dir,
+        args.max_chars,
+        args.limit_per_source,
+        split_config=split_config,
+        include_non_user_roles=args.include_non_user_roles,
     )
     if not records:
         raise FileNotFoundError(f"No encontre parquets traducidos en {args.translated_dir}")
@@ -598,6 +627,7 @@ def main() -> None:
     summary = {
         "output": str(args.output),
         "splits": split_config.as_dict(),
+        "include_non_user_roles": args.include_non_user_roles,
         "deduplication": dedup_stats,
         "balance": {
             "enabled": not args.no_balance,

@@ -120,8 +120,11 @@ relevantes para trabajar en él.
 ```bash
 uv run ruff check .          # limpio
 uv run ruff format --check . # limpio
-uv run pytest                # 44 tests, < 3 s, sin GPU ni red
+uv run pytest                # sin GPU ni red
 ```
+
+La integración continua ejecuta lo mismo en **Ubuntu y Windows**, en Python 3.11 y 3.12, y
+comprueba que `uv.lock` corresponde a `pyproject.toml`.
 
 Ambas comprobaciones pasan. La deuda heredada está declarada explícitamente en `pyproject.toml`,
 regla por regla y archivo por archivo, bajo `[tool.ruff.lint.per-file-ignores]` y

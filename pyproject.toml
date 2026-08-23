@@ -140,15 +140,6 @@ ignore = [
 # el renombrado dejaría de ser puro. Se ordena al reescribir el módulo.
 "src/guardrails/data/ingest.py" = ["I001"]
 "src/guardrails/data/translate.py" = ["I001"]
-"src/guardrails/data/build_dataset.py" = [
-    "I001",
-    # UP012 / RUF046: `"...".encode("utf-8")` y `int()` sobre un entero. Son
-    # inocuos y su corrección desplazaría líneas.
-    "UP012",
-    "RUF046",
-]
-"src/guardrails/data/corrective.py" = ["I001", "C420", "RUF046"]
-"src/guardrails/evaluation/golden_set.py" = ["I001"]
 "src/guardrails/publishing/publish_hf.py" = ["I001"]
 "src/guardrails/training/qlora.py" = [
     "I001",
@@ -181,8 +172,6 @@ indent-style = "space"
 # desplazaría las líneas y el renombrado dejaría de ser puro. Se formatean al
 # reescribirlos.
 exclude = [
-    "src/guardrails/data/build_dataset.py",
-    "src/guardrails/data/corrective.py",
     "src/guardrails/data/translate.py",
     "src/guardrails/serving/backend.py",
     "src/guardrails/serving/worker.py",

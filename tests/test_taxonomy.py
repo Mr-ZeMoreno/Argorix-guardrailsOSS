@@ -1,76 +1,101 @@
-"""Resolución de etiquetas multi-clase y órdenes de prioridad."""
+"""Taxonomía canónica: severidad, resolución y política de decisión."""
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
+from guardrails import taxonomy
 from guardrails.data import build_dataset as bd
-from guardrails.serving import backend
 
-# Orden implícito en build_dataset.primary_label() (líneas 103-118).
-ORDEN_ENTRENAMIENTO = [
+ORDEN_ESPERADO = [
+    "VIOLENCE",
+    "HARMFUL",
     "PROMPT_INJECTION",
     "JAILBREAK",
-    "SEXUAL",
-    "VIOLENCE",
     "HATE",
+    "SEXUAL",
     "POLITICS",
-    "HARMFUL",
     "SAFE",
 ]
 
 
-def _etiquetas(**activas: bool) -> dict[str, bool]:
-    labels = dict.fromkeys(bd.LABEL_COLUMNS, False)
-    labels.update({f"label_{k}": v for k, v in activas.items()})
+def _etiquetas(*activas: str) -> dict[str, bool]:
+    labels = taxonomy.empty_labels()
+    for nombre in activas:
+        labels[f"label_{nombre.lower()}"] = True
     return labels
 
 
-def test_prioridad_de_entrenamiento_es_la_documentada() -> None:
-    for i, etiqueta in enumerate(ORDEN_ENTRENAMIENTO[:-1]):
-        columna = f"label_{etiqueta.lower()}"
-        for inferior in ORDEN_ENTRENAMIENTO[i + 1 : -1]:
-            labels = _etiquetas()
-            labels[columna] = True
-            labels[f"label_{inferior.lower()}"] = True
-            assert bd.primary_label(labels) == etiqueta
+def test_el_orden_de_severidad_es_el_documentado() -> None:
+    assert list(taxonomy.LABELS) == ORDEN_ESPERADO
 
 
-@pytest.mark.characterization
-def test_pares_con_orden_distinto_entre_datos_y_runtime() -> None:
-    """Comparación entre el orden de ``primary_label`` y el de ``LABEL_PRIORITY``.
+def test_resuelve_siempre_la_etiqueta_mas_severa() -> None:
+    for i, mayor in enumerate(ORDEN_ESPERADO[:-1]):
+        for menor in ORDEN_ESPERADO[i + 1 : -1]:
+            assert taxonomy.resolve(_etiquetas(mayor, menor)) == mayor
 
-    El primero resuelve la etiqueta de los datos; el segundo arbitra en runtime
-    entre la variante original y la normalizada.
+
+def test_sin_etiquetas_activas_es_safe() -> None:
+    assert taxonomy.resolve(taxonomy.empty_labels()) == "SAFE"
+    assert taxonomy.decision_for(taxonomy.empty_labels()) == taxonomy.ALLOW
+
+
+@pytest.mark.parametrize("etiqueta", [e for e in ORDEN_ESPERADO if e != "SAFE"])
+def test_toda_etiqueta_distinta_de_safe_bloquea(etiqueta: str) -> None:
+    assert taxonomy.decision_for(_etiquetas(etiqueta)) == taxonomy.BLOCK
+
+
+def test_harmful_es_una_hoja_no_un_agregado() -> None:
+    """Si HARMFUL se derivara de las demás, absorbería a HATE, SEXUAL y POLITICS.
+
+    Con el orden de severidad adoptado, HARMFUL pesa más que esas tres, así que
+    derivarla haría la taxonomía degenerada: cualquier texto de odio se
+    resolvería como HARMFUL y las categorías específicas desaparecerían.
     """
-    invertidos = [
-        (a, b)
-        for i, a in enumerate(ORDEN_ENTRENAMIENTO)
-        for b in ORDEN_ENTRENAMIENTO[i + 1 :]
-        if backend.LABEL_PRIORITY.get(a, 0) < backend.LABEL_PRIORITY.get(b, 0)
-    ]
-    assert len(invertidos) == 9
-    assert ("PROMPT_INJECTION", "VIOLENCE") in invertidos
-    assert ("JAILBREAK", "HARMFUL") in invertidos
-
-
-@pytest.mark.characterization
-def test_resolucion_de_harmful_con_jailbreak() -> None:
-    """Un vector con harmful y jailbreak activos se resuelve como JAILBREAK."""
-    assert bd.primary_label(_etiquetas(harmful=True, jailbreak=True)) == "JAILBREAK"
-    assert bd.primary_label(_etiquetas(harmful=True)) == "HARMFUL"
-
-
-@pytest.mark.characterization
-def test_derivacion_de_label_harmful() -> None:
-    """``label_harmful`` se deriva de sexual, violence, hate y politics.
-
-    En consecuencia, una fila marcada POLITICS resuelve a BLOCK.
-    """
-    import pandas as pd
+    for especifica in ("HATE", "SEXUAL", "POLITICS"):
+        assert taxonomy.resolve(_etiquetas(especifica)) == especifica
 
     fila = pd.Series({"POLITICS": 1, "HARMFULNESS": 0, "SEXUAL": 0, "VIOLENCE": 0, "HATE SPEECH": 0})
     etiquetas = bd.labels_guardrails(fila)
     assert etiquetas["label_politics"] is True
-    assert etiquetas["label_harmful"] is True
-    assert bd.decision_for(etiquetas) == "BLOCK"
+    assert etiquetas["label_harmful"] is False, "HARMFUL no debe derivarse"
+    assert bd.primary_label(etiquetas) == "POLITICS"
+
+
+def test_el_dano_fisico_pesa_mas_que_el_tipo_de_ataque() -> None:
+    """Criterio del orden adoptado."""
+    assert taxonomy.resolve(_etiquetas("VIOLENCE", "JAILBREAK")) == "VIOLENCE"
+    assert taxonomy.resolve(_etiquetas("VIOLENCE", "PROMPT_INJECTION")) == "VIOLENCE"
+    assert taxonomy.resolve(_etiquetas("HARMFUL", "JAILBREAK")) == "HARMFUL"
+
+
+def test_hay_una_sola_definicion_del_orden() -> None:
+    """Los tres puntos del código importan la severidad del mismo módulo."""
+    from guardrails.serving import backend
+
+    assert backend.LABEL_PRIORITY is taxonomy.SEVERITY
+    assert bd.primary_label is not None
+    assert bd.LABEL_COLUMNS is taxonomy.COLUMNS
+
+
+def test_normalize_recalcula_label_safe() -> None:
+    activas = taxonomy.normalize(_etiquetas("HATE"))
+    assert activas["label_safe"] is False
+
+    vacias = taxonomy.normalize(taxonomy.empty_labels())
+    assert vacias["label_safe"] is True
+
+
+def test_labels_from_primary_es_inverso_de_resolve() -> None:
+    for etiqueta in taxonomy.LABELS:
+        assert taxonomy.resolve(taxonomy.labels_from_primary(etiqueta)) == etiqueta
+
+
+def test_rank_ordena_primero_por_decision() -> None:
+    """El runtime arbitra entre la variante original y la normalizada."""
+    bloqueo_leve = taxonomy.rank(taxonomy.BLOCK, "POLITICS")
+    permiso_alto = taxonomy.rank(taxonomy.ALLOW, "SAFE")
+    assert bloqueo_leve > permiso_alto
+    assert taxonomy.rank(taxonomy.BLOCK, "VIOLENCE") > taxonomy.rank(taxonomy.BLOCK, "SEXUAL")

@@ -10,17 +10,11 @@ from typing import Any
 
 import pandas as pd
 
+from guardrails import taxonomy
+from guardrails.data import splits
 
-LABEL_COLUMNS = (
-    "label_safe",
-    "label_harmful",
-    "label_sexual",
-    "label_violence",
-    "label_hate",
-    "label_politics",
-    "label_prompt_injection",
-    "label_jailbreak",
-)
+#: Alias del esquema canónico. La definición vive en guardrails.taxonomy.
+LABEL_COLUMNS = taxonomy.COLUMNS
 
 MUTATION_RULES = (
     (
@@ -91,35 +85,14 @@ def clean_text(value: Any, max_chars: int) -> str:
     return text
 
 
-def split_for_id(row_id: str) -> str:
-    bucket = int(hashlib.sha256(row_id.encode("utf-8")).hexdigest()[:8], 16) % 100
-    if bucket < 80:
-        return "train"
-    if bucket < 90:
-        return "validation"
-    return "test"
-
-
 def primary_label(labels: dict[str, bool]) -> str:
-    if labels["label_prompt_injection"]:
-        return "PROMPT_INJECTION"
-    if labels["label_jailbreak"]:
-        return "JAILBREAK"
-    if labels["label_sexual"]:
-        return "SEXUAL"
-    if labels["label_violence"]:
-        return "VIOLENCE"
-    if labels["label_hate"]:
-        return "HATE"
-    if labels["label_politics"]:
-        return "POLITICS"
-    if labels["label_harmful"]:
-        return "HARMFUL"
-    return "SAFE"
+    """Etiqueta primaria según el orden de severidad canónico."""
+    return taxonomy.resolve(labels)
 
 
 def decision_for(labels: dict[str, bool]) -> str:
-    return "ALLOW" if primary_label(labels) == "SAFE" else "BLOCK"
+    """Decisión que corresponde al vector de etiquetas."""
+    return taxonomy.decision_for(labels)
 
 
 def target_json(labels: dict[str, bool]) -> str:
@@ -159,16 +132,21 @@ def base_record(
     labels: dict[str, bool],
     mutation_type: str,
     parent_id: str = "",
+    group_id: str = "",
+    split_config: splits.SplitConfig = splits.DEFAULT,
 ) -> dict[str, Any]:
     row_id = stable_id(source_dataset, source_split, source_row, text_role, mutation_type, text_es)
-    labels = labels.copy()
-    labels["label_safe"] = not any(
-        labels[column] for column in LABEL_COLUMNS if column != "label_safe"
-    )
+    labels = taxonomy.normalize(labels)
     output_text = target_json(labels)
+    # La partición se decide sobre la clave de grupo, no sobre la fila: así una
+    # mutación cae siempre en la misma partición que el texto del que deriva.
+    grupo = group_id or splits.source_group(
+        {"source_dataset": source_dataset, "source_row": source_row, "text_role": text_role}
+    )
     return {
         "id": row_id,
         "parent_id": parent_id,
+        "group_id": grupo,
         "source_dataset": source_dataset,
         "source_split": source_split,
         "source_row": source_row,
@@ -177,7 +155,7 @@ def base_record(
         "original_text": original_text,
         "text_es": text_es,
         "mutation_type": mutation_type,
-        "split": split_for_id(row_id),
+        "split": splits.assign(grupo, split_config),
         "primary_label": primary_label(labels),
         "decision": decision_for(labels),
         "target_json": output_text,
@@ -197,10 +175,8 @@ def labels_guardrails(row: pd.Series) -> dict[str, bool]:
         "label_prompt_injection": False,
         "label_jailbreak": False,
     }
-    labels["label_harmful"] = labels["label_harmful"] or any(
-        labels[column]
-        for column in ("label_sexual", "label_violence", "label_hate", "label_politics")
-    )
+    # HARMFUL es una etiqueta hoja: "dañino sin categoría más específica".
+    # No se deriva de las demás; ver guardrails.taxonomy.
     return labels
 
 
@@ -265,6 +241,7 @@ def add_text_records(
     text_pairs: tuple[tuple[str, str], ...],
     label_fn,
     max_chars: int,
+    split_config: splits.SplitConfig = splits.DEFAULT,
 ) -> None:
     for source_row, row in df.iterrows():
         labels = label_fn(row)
@@ -285,6 +262,7 @@ def add_text_records(
                     text_es=text_es,
                     labels=labels,
                     mutation_type="translation",
+                    split_config=split_config,
                 )
             )
 
@@ -323,6 +301,7 @@ def add_mutations(
     *,
     max_variants_per_row: int,
     max_chars: int,
+    split_config: splits.SplitConfig = splits.DEFAULT,
 ) -> list[dict[str, Any]]:
     if max_variants_per_row <= 0:
         return records
@@ -348,16 +327,65 @@ def add_mutations(
                     labels=labels,
                     mutation_type=f"mutation_es_{index + 1}",
                     parent_id=record["id"],
+                    group_id=record["group_id"],
+                    split_config=split_config,
                 )
             )
 
     return mutated_records
 
 
+def normalized_text(value: str) -> str:
+    """Forma canónica para comparar textos: minúsculas y espacios colapsados."""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def deduplicate(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Deduplica por texto normalizado y resuelve los conflictos de etiqueta.
+
+    La versión anterior deduplicaba por el par ``(text_es, target_json)``, de
+    modo que un mismo texto etiquetado de forma distinta por dos orígenes
+    producía dos filas que sobrevivían, con identificadores distintos y por
+    tanto con particiones potencialmente distintas: la misma cadena podía estar
+    en ``train`` como SAFE y en ``test`` como HARMFUL.
+
+    Aquí el texto es la clave. Cuando dos filas comparten texto:
+
+    * si coinciden en etiqueta, se conserva una;
+    * si no coinciden, **se descartan todas**. Un texto sobre cuya etiqueta las
+      fuentes no se ponen de acuerdo no es material de entrenamiento fiable, y
+      resolver el empate en favor de una fuente arbitraria introduce ruido
+      silencioso.
+
+    El número de conflictos se devuelve para que quede registrado en el resumen.
+    """
+    if df.empty:
+        return df, {"duplicates_removed": 0, "conflicts": 0, "rows_dropped_by_conflict": 0}
+
+    trabajo = df.copy()
+    trabajo["_key"] = trabajo["text_es"].map(normalized_text)
+
+    etiquetas_por_texto = trabajo.groupby("_key")["target_json"].nunique()
+    conflictivos = set(etiquetas_por_texto[etiquetas_por_texto > 1].index)
+
+    filas_conflicto = int(trabajo["_key"].isin(conflictivos).sum())
+    limpio = trabajo[~trabajo["_key"].isin(conflictivos)]
+    antes = len(limpio)
+    limpio = limpio.drop_duplicates(subset=["_key"])
+    duplicados = antes - len(limpio)
+
+    estadisticas = {
+        "duplicates_removed": int(duplicados),
+        "conflicts": len(conflictivos),
+        "rows_dropped_by_conflict": filas_conflicto,
+    }
+    return limpio.drop(columns=["_key"]).reset_index(drop=True), estadisticas
+
+
 def order_by_hash(df: pd.DataFrame, salt: str) -> pd.DataFrame:
     ordered = df.copy()
     ordered["_sample_key"] = ordered["id"].map(
-        lambda value: hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
+        lambda value: hashlib.sha256(f"{salt}:{value}".encode()).hexdigest()
     )
     return ordered.sort_values("_sample_key").drop(columns=["_sample_key"])
 
@@ -405,7 +433,8 @@ def balance_dataset(
 
 def distribution_summary(df: pd.DataFrame) -> dict[str, Any]:
     return {
-        "rows": int(len(df)),
+        "rows": len(df),
+        "groups": int(df["group_id"].nunique()) if "group_id" in df.columns else None,
         "splits": df["split"].value_counts().to_dict(),
         "primary_labels": df["primary_label"].value_counts().to_dict(),
         "split_primary_labels": {
@@ -421,7 +450,13 @@ def distribution_summary(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def load_records(translated_dir: Path, max_chars: int, limit_per_source: int | None) -> list[dict[str, Any]]:
+def load_records(
+    translated_dir: Path,
+    max_chars: int,
+    limit_per_source: int | None,
+    *,
+    split_config: splits.SplitConfig = splits.DEFAULT,
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
 
     guardrails_dir = translated_dir / "huyhoangdinhcong__guardrails-dataset-full"
@@ -439,6 +474,7 @@ def load_records(translated_dir: Path, max_chars: int, limit_per_source: int | N
                 text_pairs=(("text", "text_es"),),
                 label_fn=labels_guardrails,
                 max_chars=max_chars,
+                split_config=split_config,
             )
 
     necent_path = translated_dir / "Necent__llm-jailbreak-prompt-injection-dataset" / "train.parquet"
@@ -455,6 +491,7 @@ def load_records(translated_dir: Path, max_chars: int, limit_per_source: int | N
             text_pairs=(("prompt", "prompt_es"), ("response", "response_es")),
             label_fn=labels_necent,
             max_chars=max_chars,
+            split_config=split_config,
         )
 
     j1n2_path = translated_dir / "J1N2__mix-prompt-injection-dataset" / "train.parquet"
@@ -471,12 +508,11 @@ def load_records(translated_dir: Path, max_chars: int, limit_per_source: int | N
             text_pairs=(("prompt", "prompt_es"), ("base_prompt", "base_prompt_es")),
             label_fn=labels_j1n2,
             max_chars=max_chars,
+            split_config=split_config,
         )
 
     bogdanminko_path = (
-        translated_dir
-        / "bogdanminko__Catch_the_prompt_injection_or_jailbreak_or_benign"
-        / "train.parquet"
+        translated_dir / "bogdanminko__Catch_the_prompt_injection_or_jailbreak_or_benign" / "train.parquet"
     )
     if bogdanminko_path.exists():
         df = pd.read_parquet(bogdanminko_path)
@@ -491,6 +527,7 @@ def load_records(translated_dir: Path, max_chars: int, limit_per_source: int | N
             text_pairs=(("prompt", "prompt_es"),),
             label_fn=labels_bogdanminko,
             max_chars=max_chars,
+            split_config=split_config,
         )
 
     return records
@@ -510,12 +547,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-per-label", type=int, default=120000)
     parser.add_argument("--max-eval-per-label", type=int, default=10000)
     parser.add_argument("--max-train-per-source-label", type=int, default=60000)
+    parser.add_argument("--split-train", type=int, default=80, help="Porcentaje de train.")
+    parser.add_argument("--split-validation", type=int, default=10, help="Porcentaje de validation.")
+    parser.add_argument("--split-test", type=int, default=10, help="Porcentaje de test.")
+    parser.add_argument(
+        "--split-salt",
+        default="",
+        help="Sal de la partición: cambiarla rota el reparto sin tocar los datos.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    records = load_records(args.translated_dir, args.max_chars, args.limit_per_source)
+    split_config = splits.SplitConfig(
+        train=args.split_train,
+        validation=args.split_validation,
+        test=args.split_test,
+        salt=args.split_salt,
+    )
+    records = load_records(
+        args.translated_dir, args.max_chars, args.limit_per_source, split_config=split_config
+    )
     if not records:
         raise FileNotFoundError(f"No encontre parquets traducidos en {args.translated_dir}")
 
@@ -524,10 +577,11 @@ def main() -> None:
             records,
             max_variants_per_row=args.max_variants_per_row,
             max_chars=args.max_chars,
+            split_config=split_config,
         )
 
     df = pd.DataFrame.from_records(records)
-    df = df.drop_duplicates(subset=["text_es", "target_json"]).reset_index(drop=True)
+    df, dedup_stats = deduplicate(df)
     before_balance = distribution_summary(df)
 
     if not args.no_balance:
@@ -543,6 +597,8 @@ def main() -> None:
 
     summary = {
         "output": str(args.output),
+        "splits": split_config.as_dict(),
+        "deduplication": dedup_stats,
         "balance": {
             "enabled": not args.no_balance,
             "max_train_per_label": args.max_train_per_label,

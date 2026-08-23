@@ -18,12 +18,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from guardrails import paths
 
-ROOT = Path(__file__).resolve().parents[1]
-APP_DIR = ROOT / "app"
-WORKER_PATH = APP_DIR / "wsl_model_worker.py"
+
+ROOT = paths.PROJECT_ROOT
+APP_DIR = paths.STATIC_DIR.parent
+WORKER_PATH = paths.WORKER_PATH
 DEFAULT_WSL_DISTRO = os.environ.get("GUARDRAIL_WSL_DISTRO", "kali-linux")
-DEFAULT_PROJECT = os.environ.get("GUARDRAIL_WSL_PROJECT", "/mnt/d/Proyectos/GuardrailsGovernance")
+DEFAULT_PROJECT = paths.wsl_project_root()
 DEFAULT_VENV = os.environ.get("GUARDRAIL_WSL_VENV", "/home/root/.venvs/guardrails-governance")
 DEFAULT_BASE_MODEL = os.environ.get("GUARDRAIL_BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 TRAIN_RUNS = {

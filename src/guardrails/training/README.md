@@ -14,9 +14,25 @@
 | Optimizador | `paged_adamw_8bit`, planificador coseno, `warmup_ratio=0.03` |
 | Longitud | 512 tokens |
 | Semilla | 42 |
+| Pérdida | sólo sobre el completado (`completion_only_loss`) |
+| Punto de control | el de menor `eval_loss`, no el último paso |
+
+`sft_text` contiene instrucción, texto de usuario y JSON objetivo. La pérdida se calcula **sólo
+sobre el JSON**: entrenar sobre el prompt gasta la mayor parte de la señal en enseñar al modelo a
+reproducir la entrada, que no es lo que se le pide en inferencia. Con `--no-best-model` se
+conserva el último paso en lugar del mejor.
 
 `SaveStateCallback` escribe `train_state.json` en el directorio de salida en cada log, para que la
 consola de gobernanza pueda mostrar el progreso.
+
+## Qué vio el modelo
+
+Con `--max-steps` el entrenamiento corta antes de completar una época, de modo que el dataset no
+basta para saber qué filas consumió. Junto al adaptador se escribe `consumed_ids.json` con los
+identificadores de train y validation, y `guardrail_training.json` registra semilla, lote efectivo
+y número de pasos.
+
+Es lo que permite comprobar después que el conjunto de medición no estaba entre ellas.
 
 ## Requisitos
 

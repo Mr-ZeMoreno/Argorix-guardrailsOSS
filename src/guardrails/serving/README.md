@@ -3,6 +3,7 @@
 | Módulo | Qué hace |
 |---|---|
 | `backend.py` | API FastAPI y paneles de entrenamiento y evaluación |
+| `normalization.py` | Normalización de entrada y arbitraje de resultados |
 | `worker.py` | Proceso persistente que carga el adaptador y responde por stdin/stdout |
 | `static/` | Frontend estático |
 
@@ -24,11 +25,23 @@ uv run guardrails serve            # http://127.0.0.1:8000
 
 ## Cómo procesa una petición
 
-`analyze_text()` normaliza el texto de entrada con `normalize_for_guardrail()`, que revierte
-ofuscaciones comunes: sustitución *leet* (`0`→`o`, `3`→`e`…), separadores insertados entre letras
-y letras espaciadas. Si la normalización cambia el texto, se invoca al modelo una segunda vez con
-la versión normalizada y `merge_results()` se queda con el resultado de mayor rango según
-`LABEL_PRIORITY`.
+`analyze_text()` normaliza el texto con `normalize_for_guardrail()`, que revierte ofuscaciones
+comunes: sustitución *leet* (`0`→`o`, `3`→`e`…), separadores insertados entre letras y letras
+espaciadas. Si la normalización cambia el texto, se invoca al modelo una segunda vez con la
+versión normalizada y `merge_results()` se queda con el resultado de mayor severidad.
+
+Ese arbitraje es **monótono hacia el bloqueo**: `BLOCK` siempre supera a `ALLOW`. La ruta de
+producción, por tanto, nunca bloquea menos que el modelo aislado.
+
+`normalization.py` vive fuera de `backend.py` y no depende de FastAPI, de modo que la evaluación
+puede medir exactamente la misma función que se sirve:
+
+```bash
+uv run guardrails eval run --production-path
+```
+
+El orden de severidad lo importa de `guardrails.taxonomy`, el mismo que usan la generación de
+datos y el generador del conjunto de medición.
 
 El worker corre en un proceso aparte, con el modelo cargado en 4 bits, y se comunica por
 stdin/stdout con JSON por línea. En Windows puede ejecutarse dentro de WSL:
@@ -42,6 +55,6 @@ cualquier ubicación y en ambos sistemas operativos. `GUARDRAIL_PROJECT_ROOT` pe
 
 ## Deuda de lint declarada
 
-En `pyproject.toml`, bajo `[tool.ruff.lint.per-file-ignores]`, este archivo tiene suprimidas
-`I001`, `B905` y `SIM105`, y está excluido del formateador. El motivo es mantenerlo idéntico al
-original mientras no se reescriba; ver el README raíz.
+En `pyproject.toml`, `backend.py` tiene suprimida `SIM105` (un `try/except/pass` en el drenaje de
+stderr del worker) y está excluido del formateador, para mantener revisable el diff de la
+migración. `normalization.py`, al ser código nuevo, cumple el conjunto completo de reglas.

@@ -11,6 +11,14 @@ para clasificar texto de usuario y devolver un JSON compacto con decisión y cla
 |---|---|
 | `ALLOW`, `BLOCK` | `SAFE`, `PROMPT_INJECTION`, `JAILBREAK`, `HARMFUL`, `VIOLENCE`, `HATE`, `SEXUAL`, `POLITICS` |
 
+El esquema, el orden de severidad y la política de decisión viven en un único módulo,
+[`guardrails.taxonomy`](src/guardrails/taxonomy.py), del que dependen la generación de datos, el
+runtime y el generador del conjunto de medición:
+
+```
+VIOLENCE > HARMFUL > PROMPT_INJECTION > JAILBREAK > HATE > SEXUAL > POLITICS > SAFE
+```
+
 ---
 
 ## Requisitos
@@ -60,9 +68,17 @@ uv run guardrails data ingest --dataset-id J1N2/mix-prompt-injection-dataset
 uv run guardrails data translate --profile finetune
 uv run guardrails data build --output data_finetune/guardrail_es.parquet
 uv run guardrails train qlora --bf16 --max-steps 3000
-uv run guardrails eval golden-set
-uv run guardrails eval run --adapter models/guardrail-qwen25-1_5b-qlora-v3-corrective
+uv run guardrails eval golden-set --output holdout.csv
+uv run guardrails eval run --adapter <ruta> --input-csv holdout.csv --load-4bit
 uv run guardrails serve
+```
+
+O la evaluación completa de una vez, que genera el conjunto de medición y reporta tanto el modelo
+aislado como la ruta de producción:
+
+```bash
+./scripts/linux/evaluate.sh <ruta-al-adaptador>     # Linux
+.\scripts\windows\evaluate.ps1 <ruta-al-adaptador>  # Windows
 ```
 
 Cada subcomando reenvía sus argumentos al módulo correspondiente, de modo que las banderas
@@ -87,11 +103,12 @@ scripts/
 src/guardrails/
   data/                  ingesta, traducción, construcción y partición de datasets
   training/              fine-tuning QLoRA
-  evaluation/            golden set, inferencia de evaluación y métricas
-  serving/               consola de gobernanza (FastAPI) y worker
+  evaluation/            conjunto de medición, inferencia y métricas
+  serving/               consola de gobernanza (FastAPI), worker y normalización
   publishing/            publicación en Hugging Face
-  cli.py                 punto de entrada
+  taxonomy.py            esquema de etiquetas, severidad y política de decisión
   paths.py               resolución portable de rutas
+  cli.py                 punto de entrada
 tests/                   tests de caracterización
 ```
 
@@ -112,9 +129,10 @@ regla por regla y archivo por archivo, bajo `[tool.ruff.lint.per-file-ignores]` 
 byte**, de modo que `git` los registra como renombrados puros y el diff de la reestructura es
 revisable. Cada supresión se retira cuando el módulo correspondiente se reescriba.
 
-Parte de los tests son de **caracterización**: fijan el comportamiento actual para que cualquier
-cambio futuro aparezca de forma visible en el diff en lugar de pasar inadvertido. Van marcados con
-`@pytest.mark.characterization`.
+La batería comprueba, entre otras cosas, que una variante léxica nunca cae en una partición
+distinta de su origen, que un texto con etiquetas contradictorias no llega al dataset, que la
+construcción del dataset correctivo aborta si el conjunto de medición aparece en él, y que las
+tasas de error están acotadas sea cual sea la entrada. Ver [`tests/`](tests/).
 
 ## Datos y modelos
 

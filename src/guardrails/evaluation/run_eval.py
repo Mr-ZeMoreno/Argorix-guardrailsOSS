@@ -32,8 +32,8 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-from guardrails import prompting
-from guardrails.evaluation import metrics
+from guardrails import prompting, taxonomy
+from guardrails.evaluation import metrics, scoring
 from guardrails.serving import normalization
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -100,6 +100,20 @@ def parse_args() -> argparse.Namespace:
             "una segunda vez si la normalización cambió el texto, y arbitra por severidad. "
             "Sin esta bandera se mide el modelo aislado, que bloquea menos."
         ),
+    )
+    parser.add_argument(
+        "--with-scores",
+        action="store_true",
+        help=(
+            "Calcula la probabilidad continua de BLOCK por caso, con una pasada adicional. "
+            "Habilita ROC, precisión media y selección de punto de operación."
+        ),
+    )
+    parser.add_argument(
+        "--max-false-positive-rate",
+        type=float,
+        default=None,
+        help="Techo de falsos positivos con el que elegir el umbral. Requiere --with-scores.",
     )
     parser.add_argument(
         "--arrival-rate-block",
@@ -224,6 +238,7 @@ def run_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "base_model": args.base_model,
         "load_4bit": bool(args.load_4bit),
         "production_path": bool(getattr(args, "production_path", False)),
+        "with_scores": bool(getattr(args, "with_scores", False)),
         "max_new_tokens": args.max_new_tokens,
         "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
         "python": sys.version.split()[0],
@@ -266,6 +281,8 @@ def main() -> None:
     model = PeftModel.from_pretrained(base, args.adapter)
     model.eval()
 
+    cabeza = scoring.DecisionHead.from_tokenizer(tokenizer) if args.with_scores else None
+
     output_handle = None
     if args.output_jsonl is not None:
         args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +322,7 @@ def main() -> None:
         started = time.perf_counter()
         parsed, generated = clasificar(texto)
         inferencias = 1
+        score = scoring.block_probability(model, tokenizer, texto, cabeza) if cabeza is not None else None
 
         if args.production_path:
             # Misma lógica que la consola de gobernanza: normalizar, reconsultar
@@ -334,6 +352,7 @@ def main() -> None:
                     parsed,
                     group_id=caso.get("group_id", ""),
                     latency_ms=latency_ms,
+                    score=score,
                 )
             )
 
@@ -355,6 +374,7 @@ def main() -> None:
                         "raw": generated.strip(),
                         "latency_ms": round(latency_ms, 2),
                         "inferences": inferencias,
+                        "score": score,
                     },
                     ensure_ascii=False,
                 )
@@ -370,6 +390,14 @@ def main() -> None:
 
     if reporte.observations:
         resultado = {"run_metadata": run_metadata(args), **reporte.as_dict()}
+        if args.max_false_positive_rate is not None and resultado.get("score"):
+            valores = [o.score for o in reporte.observations if o.score is not None]
+            positivos = [
+                o.expected_decision == taxonomy.BLOCK for o in reporte.observations if o.score is not None
+            ]
+            resultado["score"]["requested_operating_point"] = metrics.operating_point(
+                valores, positivos, args.max_false_positive_rate
+            )
         print("=" * 80)
         print(json.dumps(resultado, indent=2, ensure_ascii=False))
         if args.metrics_output is not None:

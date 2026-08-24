@@ -146,6 +146,8 @@ class Observation:
     predicted_label: str
     group_id: str = ""
     latency_ms: float | None = None
+    #: Probabilidad que el modelo asigna a BLOCK, si se solicitó.
+    score: float | None = None
 
     @property
     def parse_failed(self) -> bool:
@@ -166,6 +168,7 @@ def observation_from(
     *,
     group_id: str = "",
     latency_ms: float | None = None,
+    score: float | None = None,
 ) -> Observation:
     """Construye una observación a partir de lo esperado y lo predicho.
 
@@ -182,6 +185,7 @@ def observation_from(
         predicted_label=label,
         group_id=group_id,
         latency_ms=latency_ms,
+        score=score,
     )
 
 
@@ -327,6 +331,115 @@ def _percentiles(valores: list[float]) -> dict[str, float] | None:
     return {"p50": p(0.50), "p95": p(0.95), "p99": p(0.99), "max": round(ordenados[-1], 3)}
 
 
+def roc_auc(scores: Sequence[float], positives: Sequence[bool]) -> float | None:
+    """Área bajo la curva ROC, por el estadístico de Mann-Whitney.
+
+    Equivale a la probabilidad de que un caso positivo tomado al azar reciba
+    mayor puntuación que uno negativo. Los empates cuentan como medio acierto.
+    """
+    pos = [s for s, p in zip(scores, positives, strict=True) if p]
+    neg = [s for s, p in zip(scores, positives, strict=True) if not p]
+    if not pos or not neg:
+        return None
+
+    ordenados = sorted(zip(scores, positives, strict=True), key=lambda par: par[0])
+    rangos: dict[int, float] = {}
+    i = 0
+    while i < len(ordenados):
+        j = i
+        while j + 1 < len(ordenados) and ordenados[j + 1][0] == ordenados[i][0]:
+            j += 1
+        rango_medio = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            rangos[k] = rango_medio
+        i = j + 1
+
+    suma_pos = sum(rangos[k] for k, (_, es_pos) in enumerate(ordenados) if es_pos)
+    n_pos, n_neg = len(pos), len(neg)
+    return round((suma_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg), 6)
+
+
+def average_precision(scores: Sequence[float], positives: Sequence[bool]) -> float | None:
+    """Precisión media: área bajo la curva precisión-recall.
+
+    Más informativa que la ROC cuando la clase positiva es minoritaria. Se
+    evalúa en cada puntuación distinta, no en cada observación, de modo que un
+    grupo de empates aporta un único punto a la curva.
+    """
+    if not scores or not any(positives):
+        return None
+
+    ordenados = sorted(zip(scores, positives, strict=True), key=lambda par: -par[0])
+    total_pos = sum(positives)
+
+    area = 0.0
+    recall_previo = 0.0
+    tp = fp = 0
+    i = 0
+    while i < len(ordenados):
+        j = i
+        while j + 1 < len(ordenados) and ordenados[j + 1][0] == ordenados[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            if ordenados[k][1]:
+                tp += 1
+            else:
+                fp += 1
+        recall = tp / total_pos
+        precision = tp / (tp + fp)
+        area += (recall - recall_previo) * precision
+        recall_previo = recall
+        i = j + 1
+
+    return round(area, 6)
+
+
+def threshold_sweep(
+    scores: Sequence[float], positives: Sequence[bool], pasos: int = 21
+) -> list[dict[str, float]]:
+    """Tasas de error a lo largo del rango de umbrales."""
+    if not scores:
+        return []
+    n_pos = sum(positives)
+    n_neg = len(positives) - n_pos
+    puntos: list[dict[str, float]] = []
+    for i in range(pasos):
+        umbral = i / (pasos - 1)
+        fp = sum(1 for s, p in zip(scores, positives, strict=True) if not p and s >= umbral)
+        fn = sum(1 for s, p in zip(scores, positives, strict=True) if p and s < umbral)
+        puntos.append(
+            {
+                "threshold": round(umbral, 4),
+                "false_positive_rate": round(fp / n_neg, 6) if n_neg else None,
+                "false_negative_rate": round(fn / n_pos, 6) if n_pos else None,
+            }
+        )
+    return puntos
+
+
+def operating_point(
+    scores: Sequence[float], positives: Sequence[bool], max_false_positive_rate: float
+) -> dict[str, float] | None:
+    """Umbral más permisivo que respeta un techo de falsos positivos.
+
+    Es la forma habitual de fijar el punto de operación de un guardrail: se
+    declara cuánta fricción se tolera sobre tráfico benigno y se mide qué
+    sensibilidad se obtiene a cambio.
+    """
+    if not scores:
+        return None
+    candidatos = [
+        punto
+        for punto in threshold_sweep(scores, positives, pasos=101)
+        if punto["false_positive_rate"] is not None
+        and punto["false_positive_rate"] <= max_false_positive_rate
+    ]
+    if not candidatos:
+        return None
+    elegido = min(candidatos, key=lambda punto: punto["threshold"])
+    return {"target_false_positive_rate": max_false_positive_rate, **elegido}
+
+
 @dataclass
 class Report:
     """Resultado completo de una evaluación."""
@@ -386,6 +499,22 @@ class Report:
 
         costo_total = self.cost_model.total(tp, tn, fp, fn)
 
+        con_score = [o for o in obs if o.score is not None]
+        bloque_score: dict[str, Any] | None = None
+        if con_score:
+            valores = [o.score for o in con_score]
+            positivos = [o.expected_decision == taxonomy.BLOCK for o in con_score]
+            bloque_score = {
+                "scored": len(con_score),
+                "roc_auc": roc_auc(valores, positivos),
+                "average_precision": average_precision(valores, positivos),
+                "threshold_sweep": threshold_sweep(valores, positivos),
+                "operating_points": {
+                    f"fpr<={objetivo}": operating_point(valores, positivos, objetivo)
+                    for objetivo in (0.01, 0.02, 0.05, 0.10)
+                },
+            }
+
         return {
             "total": total,
             "effective_n": self.effective_n,
@@ -423,6 +552,7 @@ class Report:
                 ),
             },
             "latency_ms": _percentiles(latencias),
+            "score": bloque_score,
         }
 
 
@@ -438,8 +568,12 @@ __all__ = [
     "CostModel",
     "Observation",
     "Report",
+    "average_precision",
     "clopper_pearson",
     "observation_from",
+    "operating_point",
     "proportion",
+    "roc_auc",
     "summarize",
+    "threshold_sweep",
 ]

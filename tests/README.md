@@ -1,7 +1,7 @@
 # `tests/` — batería de pruebas
 
 ```bash
-uv run pytest                       # 111 tests, < 5 s, sin GPU ni red
+uv run pytest                       # 131 tests, < 5 s, sin GPU ni red
 uv run pytest -m characterization   # sólo los de caracterización
 ```
 
@@ -15,6 +15,7 @@ que la batería corre con `uv sync --group dev` y también en una máquina con l
 |---|---|
 | `test_taxonomy.py` | Orden de severidad, resolución multi-clase y política de decisión |
 | `test_prompting.py` | Plantilla de prompt y formato prompt-completion |
+| `test_scoring.py` | Probabilidad de la decisión, curvas y punto de operación |
 | `test_labeling.py` | Qué texto se clasifica y con qué etiqueta según el origen |
 | `test_splits.py` | Determinismo, proporciones configurables y agrupación de derivaciones |
 | `test_deduplication.py` | Textos repetidos y conflictos de etiqueta entre orígenes |

@@ -4,6 +4,7 @@
 |---|---|
 | `golden_set.py` | Genera el conjunto de medición de forma determinista |
 | `metrics.py` | Agregación de resultados: única implementación del proyecto |
+| `scoring.py` | Probabilidad continua de la decisión |
 | `run_eval.py` | Infiere sobre cada caso y agrega con `metrics` |
 
 ## Conjunto de evaluación
@@ -55,6 +56,33 @@ para comparar modelos bajo el mismo supuesto, no como magnitud absoluta.
 
 Con `--arrival-rate-block` se calcula además el costo esperado por petición, que es lo que cambia
 con el volumen operacional: con pocos ataques en el tráfico, el falso positivo domina.
+
+### Puntuación continua
+
+La salida del modelo es discreta, así que por sí sola no permite trazar curvas ni mover el umbral.
+`--with-scores` añade una pasada hacia adelante por caso y recupera la probabilidad de `BLOCK`:
+
+```bash
+uv run guardrails eval run --with-scores --max-false-positive-rate 0.02
+```
+
+La probabilidad no sale del texto generado. Se construye el prompt seguido del prefijo del JSON
+hasta la posición en que el siguiente token fija la clase —`{"decision":"`— y se comparan los
+logits de los primeros tokens de `ALLOW` y `BLOCK`. Es determinista y no depende de que la salida
+se pueda parsear.
+
+Con puntuación disponible, el informe añade un bloque `score`:
+
+| Campo | Contenido |
+|---|---|
+| `roc_auc` | Área bajo la curva ROC |
+| `average_precision` | Área bajo precisión-recall, más informativa con clase minoritaria |
+| `threshold_sweep` | FPR y FNR a lo largo del rango de umbrales |
+| `operating_points` | Umbral más permisivo que respeta techos de 1 %, 2 %, 5 % y 10 % de falsos positivos |
+
+`--max-false-positive-rate` añade el punto correspondiente al techo que se le indique. Es la
+forma habitual de fijar el punto de operación de un guardrail: se declara cuánta fricción se
+tolera sobre tráfico benigno y se mide qué sensibilidad se obtiene a cambio.
 
 ### Dos cifras, no una
 

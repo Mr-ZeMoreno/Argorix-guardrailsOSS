@@ -30,6 +30,7 @@ import argparse
 import csv
 import hashlib
 import unicodedata
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from guardrails import taxonomy
@@ -336,83 +337,63 @@ def _row(
     }
 
 
-def build_rows() -> list[dict[str, str]]:
-    """Todas las filas del conjunto, en orden determinista."""
-    filas: list[dict[str, str]] = []
+def _safe_variants(categoria: str, indice: int, topico: str) -> Iterator[dict[str, str]]:
+    """Filas benignas que produce un tópico: rotación, versión larga y ofuscada."""
+    grupo = f"safe:{categoria}:{indice:02d}"
+    comun = {"group_id": grupo, "label": "SAFE", "category": categoria}
 
-    # --- benignas: las seis categorías, los diez verbos, los diez contextos ---
+    for paso in range(len(SAFE_VERBS)):
+        verbo = SAFE_VERBS[(indice + paso) % len(SAFE_VERBS)]
+        contexto = SAFE_CONTEXTS[(indice + paso) % len(SAFE_CONTEXTS)]
+        yield _row(text=f"{verbo} {topico}, {contexto}.", variant=f"plain_{paso}", **comun)
+
+    base = f"{SAFE_VERBS[indice % len(SAFE_VERBS)]} {topico}"
+    yield _row(
+        text=f"{LONG_PREAMBLE}{base.lower()}, con el detalle que consideres necesario.",
+        variant="long",
+        **comun,
+    )
+
+    nombre, ofuscar = OBFUSCATIONS[indice % len(OBFUSCATIONS)]
+    yield _row(
+        text=ofuscar(f"{base}, sin instrucciones peligrosas."),
+        variant=f"obfuscated_{nombre}",
+        **comun,
+    )
+
+
+def _block_variants(etiqueta: str, indice: int, semilla: str) -> Iterator[dict[str, str]]:
+    """Filas de bloqueo que produce una semilla: envoltorios, larga y ofuscadas."""
+    categoria = etiqueta.lower()
+    grupo = f"block:{categoria}:{indice:02d}"
+    comun = {"group_id": grupo, "label": etiqueta, "category": categoria}
+
+    for orden, envoltorio in enumerate(WRAPPERS):
+        yield _row(text=envoltorio.format(text=semilla), variant=f"wrapper_{orden}", **comun)
+
+    yield _row(
+        text=f"{LONG_PREAMBLE}{semilla[0].lower()}{semilla[1:]}",
+        variant="long",
+        **comun,
+    )
+
+    for nombre, ofuscar in OBFUSCATIONS:
+        yield _row(text=ofuscar(semilla), variant=f"obfuscated_{nombre}", **comun)
+
+
+def _all_variants() -> Iterator[dict[str, str]]:
+    """Todas las filas candidatas, antes de deduplicar."""
     for categoria, topicos in SAFE_TOPICS.items():
-        for indice_topico, topico in enumerate(topicos):
-            grupo = f"safe:{categoria}:{indice_topico:02d}"
-            for paso in range(len(SAFE_VERBS)):
-                verbo = SAFE_VERBS[(indice_topico + paso) % len(SAFE_VERBS)]
-                contexto = SAFE_CONTEXTS[(indice_topico + paso) % len(SAFE_CONTEXTS)]
-                filas.append(
-                    _row(
-                        text=f"{verbo} {topico}, {contexto}.",
-                        group_id=grupo,
-                        label="SAFE",
-                        category=categoria,
-                        variant=f"plain_{paso}",
-                    )
-                )
-            base = f"{SAFE_VERBS[indice_topico % len(SAFE_VERBS)]} {topico}"
-            filas.append(
-                _row(
-                    text=f"{LONG_PREAMBLE}{base.lower()}, con el detalle que consideres necesario.",
-                    group_id=grupo,
-                    label="SAFE",
-                    category=categoria,
-                    variant="long",
-                )
-            )
-            nombre_ofus, funcion = OBFUSCATIONS[indice_topico % len(OBFUSCATIONS)]
-            filas.append(
-                _row(
-                    text=funcion(f"{base}, sin instrucciones peligrosas."),
-                    group_id=grupo,
-                    label="SAFE",
-                    category=categoria,
-                    variant=f"obfuscated_{nombre_ofus}",
-                )
-            )
+        for indice, topico in enumerate(topicos):
+            yield from _safe_variants(categoria, indice, topico)
 
-    # --- de bloqueo: las siete clases, con envoltorio, longitud y ofuscación ---
     for etiqueta, semillas in BLOCK_SEEDS.items():
-        categoria = etiqueta.lower()
-        for indice_semilla, semilla in enumerate(semillas):
-            grupo = f"block:{categoria}:{indice_semilla:02d}"
-            for indice_env, envoltorio in enumerate(WRAPPERS):
-                filas.append(
-                    _row(
-                        text=envoltorio.format(text=semilla),
-                        group_id=grupo,
-                        label=etiqueta,
-                        category=categoria,
-                        variant=f"wrapper_{indice_env}",
-                    )
-                )
-            filas.append(
-                _row(
-                    text=f"{LONG_PREAMBLE}{semilla[0].lower()}{semilla[1:]}",
-                    group_id=grupo,
-                    label=etiqueta,
-                    category=categoria,
-                    variant="long",
-                )
-            )
-            for nombre_ofus, funcion in OBFUSCATIONS:
-                filas.append(
-                    _row(
-                        text=funcion(semilla),
-                        group_id=grupo,
-                        label=etiqueta,
-                        category=categoria,
-                        variant=f"obfuscated_{nombre_ofus}",
-                    )
-                )
+        for indice, semilla in enumerate(semillas):
+            yield from _block_variants(etiqueta, indice, semilla)
 
-    # Deduplicación por texto: una misma cadena no debe evaluarse dos veces.
+
+def _unique_by_text(filas: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    """Conserva la primera aparición de cada texto, en orden de generación."""
     vistos: set[str] = set()
     unicas: list[dict[str, str]] = []
     for fila in filas:
@@ -421,6 +402,11 @@ def build_rows() -> list[dict[str, str]]:
         vistos.add(fila["text"])
         unicas.append(fila)
     return unicas
+
+
+def build_rows() -> list[dict[str, str]]:
+    """Todas las filas del conjunto, en orden determinista y sin repetir texto."""
+    return _unique_by_text(_all_variants())
 
 
 def summary(filas: list[dict[str, str]]) -> dict[str, object]:

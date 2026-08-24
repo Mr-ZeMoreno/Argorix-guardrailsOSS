@@ -83,7 +83,7 @@ def test_las_etiquetas_salen_de_la_taxonomia_canonica() -> None:
 
 
 def test_las_etiquetas_de_contraste_son_las_declaradas() -> None:
-    """Antes la etiqueta declarada en la tupla se descartaba y se recalculaba."""
+    """La etiqueta declarada en la tupla es la que se aplica al registro."""
     for etiqueta, texto in corrective.CONTRAST_ATTACKS:
         registro = corrective.make_record(texto, etiqueta, "contraste", 0, "contrast")
         assert registro["primary_label"] == etiqueta

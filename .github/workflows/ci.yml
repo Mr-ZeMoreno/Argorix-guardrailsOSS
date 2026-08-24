@@ -41,10 +41,29 @@ jobs:
         run: uv run ruff format --check .
 
       - name: pytest
-        run: uv run pytest
+        run: uv run pytest -m "not integration"
 
       - name: Comprobar el CLI
         run: uv run guardrails doctor
+
+  integration:
+    name: entrenamiento en CPU
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sincronizar con la pila de entrenamiento
+        # En macOS el lock resuelve torch de PyPI (CPU), que es lo que necesita
+        # este trabajo. bitsandbytes queda excluido por marcador de plataforma.
+        run: uv sync --extra train --group dev
+
+      - name: Entrenamiento de extremo a extremo sobre un modelo diminuto
+        run: uv run pytest -m integration -v
 
   lock:
     name: uv.lock al día

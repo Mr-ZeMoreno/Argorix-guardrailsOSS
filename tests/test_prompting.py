@@ -58,7 +58,7 @@ def test_los_registros_traen_las_dos_columnas() -> None:
 
 
 def test_los_cuatro_puntos_comparten_la_plantilla() -> None:
-    """Estaba duplicada en cuatro módulos y había que sincronizarla a mano."""
+    """Construcción del dataset, dataset correctivo, evaluación y worker."""
     from guardrails.evaluation import run_eval
     from guardrails.serving import worker
 
@@ -69,14 +69,18 @@ def test_los_cuatro_puntos_comparten_la_plantilla() -> None:
 
 
 def test_el_entrenador_no_recibe_dataset_text_field() -> None:
-    """Pasarlo haría que TRL tratase el ejemplo como language modeling."""
+    """Comprobación estática, sin necesidad del extra `train`.
+
+    La verificación funcional equivalente está en test_training_integration.py,
+    que ejecuta el entrenador de verdad.
+    """
     import ast
     import inspect
     import textwrap
 
     from guardrails.training import qlora
 
-    arbol = ast.parse(textwrap.dedent(inspect.getsource(qlora.main)))
+    arbol = ast.parse(textwrap.dedent(inspect.getsource(qlora.main_with_args)))
 
     llamadas = {
         getattr(nodo.func, "id", "") or getattr(nodo.func, "attr", "")

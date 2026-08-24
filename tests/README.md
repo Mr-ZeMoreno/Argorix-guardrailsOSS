@@ -14,6 +14,7 @@ que la batería corre con `uv sync --group dev` y también en una máquina con l
 | Archivo | Qué cubre |
 |---|---|
 | `test_taxonomy.py` | Orden de severidad, resolución multi-clase y política de decisión |
+| `test_prompting.py` | Plantilla de prompt y formato prompt-completion |
 | `test_labeling.py` | Qué texto se clasifica y con qué etiqueta según el origen |
 | `test_splits.py` | Determinismo, proporciones configurables y agrupación de derivaciones |
 | `test_deduplication.py` | Textos repetidos y conflictos de etiqueta entre orígenes |
@@ -38,9 +39,29 @@ Estos son los que conviene no romper:
 - Sólo se clasifica texto de entrada de usuario; la respuesta del modelo no hereda la etiqueta
   del prompt salvo que se pida explícitamente.
 
-La integración continua (`.github/workflows/ci.yml`) ejecuta lint, formato, batería y CLI en
-**Ubuntu y Windows**, en Python 3.11 y 3.12, y comprueba que `uv.lock` corresponde a
-`pyproject.toml`.
+## Tests de integración
+
+`test_training_integration.py` ejecuta el entrenamiento completo sobre un modelo de pruebas de
+unos pocos MB, en CPU y en segundos. Comprueba que la configuración del entrenador es aceptable
+para la versión de TRL instalada, que es lo que no puede verificarse por inspección estática.
+
+Requiere el extra `train` y va marcado con `integration`, de modo que la batería por defecto no lo
+ejecuta:
+
+```bash
+uv sync --extra train
+uv run pytest -m integration
+```
+
+## Integración continua
+
+`.github/workflows/ci.yml` ejecuta:
+
+| Trabajo | Dónde | Qué |
+|---|---|---|
+| `check` | Ubuntu y Windows × Python 3.11 y 3.12 | lint, formato, batería sin integración, CLI |
+| `integration` | macOS | entrenamiento de extremo a extremo en CPU |
+| `lock` | Ubuntu | que `uv.lock` corresponda a `pyproject.toml` |
 
 ## Tests de caracterización
 

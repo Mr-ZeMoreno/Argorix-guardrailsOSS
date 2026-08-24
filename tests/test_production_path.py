@@ -48,7 +48,7 @@ def test_sin_cambio_de_texto_se_conserva_el_resultado_original() -> None:
 
 
 def test_el_conjunto_de_evaluacion_ejercita_la_ruta_de_produccion() -> None:
-    """Antes ninguna fila activaba la normalización: esa defensa no se medía."""
+    """Sin filas que la activen, esa defensa no queda medida."""
     filas = golden_set.build_rows()
     activan = [f for f in filas if normalization.normalize_for_guardrail(f["text"])["score"] > 0]
 

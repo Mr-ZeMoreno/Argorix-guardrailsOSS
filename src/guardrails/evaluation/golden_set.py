@@ -3,20 +3,16 @@
 Determinista: no usa aleatoriedad, de modo que el archivo se reproduce bit a
 bit. Cada fila declara su procedencia y su ``group_id``.
 
-Diferencias respecto de la versión anterior:
+Cobertura:
 
-* **Cobertura completa.** Se emiten las seis categorías benignas declaradas y
-  los diez contextos, no las tres y dos primeras. Antes un tope de filas cortaba
-  el bucle antes de llegar a las demás, dejando fuera precisamente las de
-  frontera difícil.
-* **Las ocho clases del esquema están representadas**, incluida ``POLITICS``.
-* **Régimen de longitud realista.** Se incluyen variantes largas, porque el
-  tráfico real es varias veces más largo que un prompt de plantilla.
-* **Ofuscación.** Se incluyen variantes con sustitución *leet*, letras
-  espaciadas y separadores insertados, que son la clase de evasión que la ruta
-  de producción normaliza. Sin ellas esa defensa nunca se ejercita.
-* **``group_id``.** Las filas derivadas de una misma unidad semántica comparten
-  grupo, para que las métricas no las traten como observaciones independientes.
+* Las seis categorías benignas declaradas y los diez contextos.
+* Las ocho clases del esquema, incluida ``POLITICS``.
+* Variantes largas, del orden del tráfico real, además de las de plantilla.
+* Variantes ofuscadas —sustitución *leet*, letras espaciadas y separadores
+  insertados—, que son la clase de evasión que la ruta de producción normaliza
+  y que sólo se ejercita si el conjunto las contiene.
+* ``group_id`` por unidad semántica, para que las métricas no traten como
+  observaciones independientes las filas derivadas de una misma base.
 
 Sobre ``POLITICS``: la etiqueta designa *manipulación* política —propaganda
 engañosa, suplantación de candidatos, desinformación electoral—, no información

@@ -126,11 +126,9 @@ uv run pytest                # sin GPU ni red
 La integración continua ejecuta lo mismo en **Ubuntu y Windows**, en Python 3.11 y 3.12, y
 comprueba que `uv.lock` corresponde a `pyproject.toml`.
 
-Ambas comprobaciones pasan. La deuda heredada está declarada explícitamente en `pyproject.toml`,
-regla por regla y archivo por archivo, bajo `[tool.ruff.lint.per-file-ignores]` y
-`[tool.ruff.format]`: los módulos migrados desde la raíz del repositorio se conservan **byte a
-byte**, de modo que `git` los registra como renombrados puros y el diff de la reestructura es
-revisable. Cada supresión se retira cuando el módulo correspondiente se reescriba.
+Ambas comprobaciones pasan. Las supresiones vigentes están declaradas archivo por archivo y regla
+por regla en `pyproject.toml`, bajo `[tool.ruff.lint.per-file-ignores]` y `[tool.ruff.format]`,
+cada una con su motivo. Se retiran a medida que se reescriben los módulos correspondientes.
 
 La batería comprueba, entre otras cosas, que una variante léxica nunca cae en una partición
 distinta de su origen, que un texto con etiquetas contradictorias no llega al dataset, que la

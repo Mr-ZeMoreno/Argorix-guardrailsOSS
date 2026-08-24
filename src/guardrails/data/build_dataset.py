@@ -353,13 +353,11 @@ def normalized_text(value: str) -> str:
 def deduplicate(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Deduplica por texto normalizado y resuelve los conflictos de etiqueta.
 
-    La versión anterior deduplicaba por el par ``(text_es, target_json)``, de
-    modo que un mismo texto etiquetado de forma distinta por dos orígenes
-    producía dos filas que sobrevivían, con identificadores distintos y por
-    tanto con particiones potencialmente distintas: la misma cadena podía estar
-    en ``train`` como SAFE y en ``test`` como HARMFUL.
+    La clave es el texto normalizado, no el par texto-etiqueta: deduplicar por
+    el par deja pasar la misma cadena con etiquetas distintas, que acabaría
+    repartida entre particiones con verdades opuestas.
 
-    Aquí el texto es la clave. Cuando dos filas comparten texto:
+    Cuando dos filas comparten texto:
 
     * si coinciden en etiqueta, se conserva una;
     * si no coinciden, **se descartan todas**. Un texto sobre cuya etiqueta las

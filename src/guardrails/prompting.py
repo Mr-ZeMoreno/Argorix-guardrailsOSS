@@ -1,8 +1,8 @@
 """Plantilla de prompt del guardrail.
 
-Única definición. Antes estaba duplicada en cuatro módulos —construcción del
-dataset, dataset correctivo, evaluación y worker— y había que mantenerlas
-sincronizadas a mano.
+Definición única, compartida por la construcción del dataset, el dataset
+correctivo, la evaluación y el worker de inferencia. El prompt debe ser
+idéntico en entrenamiento y en inferencia.
 
 El par ``(prompt, completion)`` es además el formato que espera TRL para
 calcular la pérdida **sólo sobre el completado**. Con un único campo de texto,
@@ -38,8 +38,7 @@ def build_sft_text(text: str, target_json: str) -> str:
 def split_sft_text(sft_text: str) -> tuple[str, str]:
     """Separa una secuencia completa en ``(prompt, completion)``.
 
-    Permite usar parquets generados antes de que el esquema incluyera las dos
-    columnas por separado.
+    Permite consumir parquets que sólo traen la secuencia completa.
     """
     indice = sft_text.find(COMPLETION_MARKER)
     if indice < 0:

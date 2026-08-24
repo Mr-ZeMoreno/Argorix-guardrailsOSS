@@ -1,7 +1,7 @@
 """Resolución portable de rutas del proyecto.
 
-Sustituye a las rutas absolutas que había codificadas en el árbol original, que
-acoplaban el repositorio a una máquina concreta.
+Todas las rutas del proyecto se derivan de aquí, de modo que el código no
+depende de dónde esté instalado ni de qué sistema operativo lo ejecute.
 
 La raíz se determina, en este orden:
 

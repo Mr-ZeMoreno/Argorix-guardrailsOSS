@@ -1,17 +1,13 @@
 """Partición de datasets en train / validation / test.
 
-Sustituye a las dos funciones de partición que existían —una repartía 80/10/10
-y la otra 88/6/6, ninguna aceptaba semilla— por una sola, configurable y
-**consciente de grupos**.
+La partición se calcula sobre la **clave de grupo**, no sobre el identificador
+de cada fila. Una variante léxica comparte grupo con el texto del que deriva, de
+modo que ambas caen en la misma partición por construcción; calcularla por fila
+las repartiría de forma independiente y dejaría el original en ``train`` con su
+paráfrasis en ``test``.
 
-El punto central es la clave de grupo. Antes la partición se calculaba sobre el
-identificador de cada fila, de modo que una variante léxica recibía un hash
-independiente del de su original y podía caer en una partición distinta. Con
-aumentación activada, alrededor de un tercio de los pares quedaba separado: el
-original en ``train`` y su paráfrasis en ``test``.
-
-Aquí la partición se calcula sobre la **clave de grupo**, no sobre la fila, de
-modo que todas las derivaciones de un mismo origen caen juntas por construcción.
+Las proporciones y la sal son configurables. Cambiar la sal rota el reparto sin
+tocar los datos, que es lo que permite estimar cuánta varianza aporta.
 """
 
 from __future__ import annotations

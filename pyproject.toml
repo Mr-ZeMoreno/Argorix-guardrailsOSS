@@ -72,7 +72,7 @@ packages = ["src/guardrails"]
 # uv: índices por plataforma
 #
 # Windows y Linux resuelven torch desde el índice CUDA 12.8 de PyTorch, que es
-# el que usaba el pipeline original (scripts/linux/smoke_train.sh).
+# el que fijan los lanzadores de scripts/.
 # macOS (máquina de análisis, sin CUDA) resuelve desde PyPI para que
 # `uv lock` y `uv sync` funcionen también ahí.
 # ---------------------------------------------------------------------------
@@ -125,19 +125,13 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # ---------------------------------------------------------------------------
-# DEUDA HEREDADA
+# Supresiones por archivo
 #
-# Los módulos migrados desde la raíz del repositorio conservan su contenido
-# byte a byte a propósito: la reestructura mueve archivos, no los reescribe.
-# Mantenerlos idénticos hace que git los registre como renombrados puros y que
-# el diff de la migración sea revisable.
-#
-# Cada supresión de abajo es deuda explícita y se retira cuando el módulo
+# Cada entrada es deuda explícita, con su motivo. Se retira cuando el módulo
 # correspondiente se reescriba.
 # ---------------------------------------------------------------------------
 
-# I001: bloque de imports sin ordenar. Corregirlo desplazaría las líneas y
-# el renombrado dejaría de ser puro. Se ordena al reescribir el módulo.
+# I001: bloque de imports sin ordenar.
 "src/guardrails/data/ingest.py" = ["I001"]
 "src/guardrails/data/translate.py" = ["I001"]
 "src/guardrails/publishing/publish_hf.py" = ["I001"]
@@ -159,9 +153,7 @@ known-first-party = ["guardrails"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-# DEUDA HEREDADA: seis módulos migrados aún no están formateados. Reformatearlos
-# desplazaría las líneas y el renombrado dejaría de ser puro. Se formatean al
-# reescribirlos.
+# Módulos pendientes de formatear. Se incorporan al reescribirlos.
 exclude = [
     "src/guardrails/data/translate.py",
     "src/guardrails/serving/backend.py",
@@ -177,4 +169,5 @@ pythonpath = ["src"]
 addopts = "-q --strict-markers"
 markers = [
     "characterization: fija el comportamiento actual para que un cambio futuro sea visible en el diff",
+    "integration: ejercita la pila de entrenamiento; requiere el extra `train`",
 ]

@@ -1,13 +1,12 @@
 """Taxonomía canónica de etiquetas.
 
-Única definición del esquema de etiquetas, del orden de severidad y de la
-política de decisión. Antes existían tres órdenes distintos —uno en la
-generación de datos, otro en el runtime y un tercero implícito en el generador
-del conjunto de evaluación—, de modo que un mismo texto podía recibir etiquetas
-diferentes según qué componente lo resolviera.
+Definición única del esquema de etiquetas, del orden de severidad y de la
+política de decisión. La importan la generación de datos, el runtime y el
+generador del conjunto de evaluación, de modo que un mismo texto se resuelve
+igual en los tres.
 
-El orden adoptado es el de severidad operacional: el daño físico pesa más que
-el tipo de ataque.
+El orden es el de severidad operacional: el daño físico pesa más que el tipo de
+ataque.
 
     VIOLENCE > HARMFUL > PROMPT_INJECTION > JAILBREAK > HATE > SEXUAL > POLITICS > SAFE
 

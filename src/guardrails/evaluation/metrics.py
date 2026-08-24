@@ -1,8 +1,8 @@
 """Cálculo de métricas de evaluación.
 
-Única implementación del proyecto. Antes existían dos —una en el evaluador y
-otra en el backend de la consola— con criterios distintos, de modo que sobre la
-misma ejecución podían mostrar cifras diferentes.
+Implementación única, compartida por el evaluador y por la consola de
+gobernanza, de modo que ambos reportan las mismas cifras para una misma
+ejecución.
 
 Propiedades que garantiza:
 

@@ -36,13 +36,36 @@ Es lo que permite comprobar después que el conjunto de medición no estaba entr
 
 ## Requisitos
 
-GPU NVIDIA con CUDA, en **Linux o Windows**. El módulo aborta explícitamente si `torch.cuda` no
-está disponible.
+Para entrenar de verdad, GPU NVIDIA con CUDA, en **Linux o Windows**.
 
 ```bash
 uv sync --extra train
 uv run guardrails doctor          # confirma que torch ve la GPU
 uv run guardrails train qlora --help
+```
+
+### Sin GPU
+
+`--device cpu --no-quantization` ejecuta la cadena completa sobre CPU. La cuantización de 4 bits
+depende de bitsandbytes, que requiere CUDA, y el optimizador cambia a `adamw_torch`.
+
+No sirve para producir un modelo —es órdenes de magnitud más lento— pero sí para validar que la
+configuración es correcta antes de reservar una GPU. `tests/test_training_integration.py` hace
+exactamente eso con un modelo de pruebas de unos pocos MB, en segundos:
+
+```bash
+uv sync --extra train
+uv run pytest -m integration
+```
+
+### Sesiones que se cortan
+
+En cualquier GPU de nivel gratuito la sesión termina antes que el entrenamiento. El estado se
+guarda cada `--save-steps`, y `--resume-from-checkpoint auto` continúa desde el punto de control
+más reciente de `--output-dir`:
+
+```bash
+uv run guardrails train qlora --dataset ... --output-dir models/v4 --resume-from-checkpoint auto
 ```
 
 ## Uso

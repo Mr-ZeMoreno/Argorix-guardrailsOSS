@@ -1,9 +1,6 @@
 """Punto de entrada único y portable del proyecto.
 
-Sustituye a los lanzadores acoplados a una máquina concreta (``*.ps1`` que
-invocaban ``env\\Scripts\\python.exe`` y ``*.sh`` que hacían ``cd`` a
-una ruta absoluta de otra máquina). El mismo comando funciona en
-Windows y en Linux::
+El mismo comando funciona en Windows y en Linux::
 
     uv run guardrails doctor
     uv run guardrails data build --output data_finetune/guardrail_es.parquet
@@ -11,8 +8,8 @@ Windows y en Linux::
     uv run guardrails train qlora --bf16 --max-steps 3000
 
 Cada subcomando delega en el ``main()`` del módulo correspondiente y le pasa
-los argumentos restantes sin tocarlos, de modo que las banderas documentadas en
-el pipeline original siguen siendo válidas.
+los argumentos restantes sin tocarlos, de modo que las banderas propias de cada
+etapa se documentan con ``--help`` en ese nivel.
 
 Las importaciones son perezosas a propósito: ``guardrails doctor`` y
 ``guardrails eval golden-set`` no requieren torch.

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 import torch
 from datasets import Dataset, load_dataset
@@ -76,9 +77,9 @@ def consumed_ids(dataset) -> list[str]:
     return list(dataset["id"])
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fine-tune Qwen/Gemma style guardrail with QLoRA over sft_text."
+        description="Fine-tuning QLoRA del guardrail sobre pares prompt-completion."
     )
     parser.add_argument("--dataset", type=Path, default=Path("data_finetune/guardrail_es.parquet"))
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -101,13 +102,66 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--merge", action="store_true")
     parser.add_argument(
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default="auto",
+        help="Dispositivo de entrenamiento. `auto` usa CUDA si está disponible.",
+    )
+    parser.add_argument(
+        "--no-quantization",
+        dest="quantize",
+        action="store_false",
+        help="Carga el modelo base sin cuantizar. Obligatorio fuera de CUDA.",
+    )
+    parser.set_defaults(quantize=True)
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        default=None,
+        metavar="RUTA|auto",
+        help="Reanuda desde un punto de control. `auto` toma el más reciente de --output-dir.",
+    )
+    parser.add_argument(
         "--no-best-model",
         dest="load_best_model",
         action="store_false",
         help="Conserva el último punto de control en vez del de menor pérdida de validación.",
     )
     parser.set_defaults(load_best_model=True)
-    return parser.parse_args()
+    return parser
+
+
+def resolve_device(preferencia: str) -> str:
+    """Dispositivo efectivo a partir de la preferencia indicada."""
+    if preferencia == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if preferencia == "cuda":
+        raise RuntimeError("Se pidió CUDA y torch.cuda no está disponible.")
+    return "cpu"
+
+
+def latest_checkpoint(output_dir: Path) -> Path | None:
+    """Punto de control más reciente dentro de un directorio de salida."""
+    puntos = sorted(
+        (d for d in output_dir.glob("checkpoint-*") if d.is_dir()),
+        key=lambda d: int(d.name.rsplit("-", 1)[-1]),
+    )
+    return puntos[-1] if puntos else None
+
+
+def resolve_resume(valor: str | None, output_dir: Path) -> str | bool | None:
+    """Argumento que espera ``Trainer.train`` para reanudar."""
+    if valor is None:
+        return None
+    if valor != "auto":
+        return valor
+    punto = latest_checkpoint(output_dir)
+    if punto is None:
+        print(f"No hay puntos de control en {output_dir}; se entrena desde cero.")
+        return None
+    print(f"Reanudando desde {punto}.")
+    return str(punto)
 
 
 def _ensure_prompt_completion(dataset):
@@ -115,8 +169,8 @@ def _ensure_prompt_completion(dataset):
 
     TRL sólo calcula la pérdida sobre el completado si el dataset viene en ese
     formato; con un único campo de texto lo trata como *language modeling* y
-    rechaza la opción con ValueError. Los parquets generados antes de que el
-    esquema incluyera las dos columnas se derivan a partir de ``sft_text``.
+    rechaza la opción con ValueError. Un parquet que sólo traiga ``sft_text``
+    se convierte al vuelo.
     """
     if {"prompt", "completion"} <= set(dataset.column_names):
         return dataset
@@ -162,12 +216,16 @@ def print_dataset_stats(train_ds: Dataset, eval_ds: Dataset) -> None:
     print(json.dumps(dict(sorted(labels.items())), indent=2, ensure_ascii=False))
 
 
-def main() -> None:
-    args = parse_args()
+def main_with_args(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA no esta disponible. Ejecuta esto dentro de WSL con acceso a NVIDIA.")
+    device = resolve_device(args.device)
+    quantize = args.quantize and device == "cuda"
+    if args.quantize and not quantize:
+        print(f"Cuantización desactivada: requiere CUDA y el dispositivo es {device}.")
+    # `paged_adamw_8bit` proviene de bitsandbytes y sólo está disponible con CUDA.
+    optimizador = "paged_adamw_8bit" if quantize else "adamw_torch"
 
     train_ds, eval_ds = load_sft_splits(
         args.dataset,
@@ -184,21 +242,22 @@ def main() -> None:
     tokenizer.padding_side = "right"
 
     compute_dtype = torch.bfloat16 if args.bf16 else torch.float16
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=compute_dtype,
-    )
+    carga: dict[str, Any] = {"attn_implementation": "sdpa"}
+    if quantize:
+        carga["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=compute_dtype,
+        )
+        carga["device_map"] = "auto"
+    else:
+        carga["dtype"] = torch.float32 if device == "cpu" else compute_dtype
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        quantization_config=quant_config,
-        device_map="auto",
-        attn_implementation="sdpa",
-    )
+    model = AutoModelForCausalLM.from_pretrained(args.model, **carga)
     model.config.use_cache = False
-    model = prepare_model_for_kbit_training(model)
+    if quantize:
+        model = prepare_model_for_kbit_training(model)
 
     peft_config = None
     if args.adapter_init is not None:
@@ -232,14 +291,15 @@ def main() -> None:
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        optim="paged_adamw_8bit",
+        optim=optimizador,
         logging_steps=args.logging_steps,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_steps=args.save_steps,
         save_total_limit=3,
-        bf16=args.bf16,
-        fp16=args.fp16 or not args.bf16,
+        bf16=args.bf16 and device == "cuda",
+        fp16=(args.fp16 or not args.bf16) and device == "cuda",
+        use_cpu=device == "cpu",
         gradient_checkpointing=True,
         report_to="none",
         # Sin dataset_text_field: el dataset viene en formato prompt-completion,
@@ -271,7 +331,7 @@ def main() -> None:
         callbacks=[SaveStateCallback(args.output_dir)],
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resolve_resume(args.resume_from_checkpoint, args.output_dir))
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(str(args.output_dir))
 
@@ -295,6 +355,9 @@ def main() -> None:
         "seed": args.seed,
         "max_steps": args.max_steps,
         "effective_batch_size": args.train_batch_size * args.gradient_accumulation_steps,
+        "device": device,
+        "quantized": quantize,
+        "optim": optimizador,
         "completion_only_loss": True,
         "load_best_model_at_end": args.load_best_model,
         "consumed_ids_file": "consumed_ids.json" if ids_train else None,
@@ -305,6 +368,11 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"Adapter guardado en {args.output_dir}")
+
+
+def main() -> None:
+    """Punto de entrada de la línea de órdenes."""
+    main_with_args()
 
 
 if __name__ == "__main__":

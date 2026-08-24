@@ -2,16 +2,13 @@
 
 Un dataset correctivo se arma a partir de los errores que un modelo comete
 sobre un conjunto de casos: se toman los fallos, se refuerzan y se reentrena.
-Es una técnica de depuración válida, pero tiene una condición que la versión
-anterior no cumplía.
 
-**El conjunto del que se extraen los errores no puede ser el mismo con el que
-después se mide.** Antes lo era: las predicciones de entrada provenían de
-evaluar sobre el conjunto de medición, y sus textos entraban literalmente al
-entrenamiento —la primera «variante» de cada uno era el texto sin modificar—.
-Medir después sobre ese mismo conjunto no estima generalización.
+La condición que hace válida esa técnica es que **el conjunto del que se
+extraen los errores no sea el mismo con el que después se mide**. Los textos de
+refuerzo entran al entrenamiento, así que medir sobre ellos no estima
+generalización.
 
-Aquí el pipeline exige dos conjuntos distintos:
+El pipeline exige por eso dos conjuntos distintos:
 
 ``--corrections``
     Predicciones sobre el **conjunto de corrección**. De aquí salen los

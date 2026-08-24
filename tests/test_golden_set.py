@@ -29,7 +29,7 @@ def test_no_hay_textos_repetidos(filas: list[dict[str, str]]) -> None:
 
 
 def test_las_seis_categorias_benignas_estan_representadas(filas: list[dict[str, str]]) -> None:
-    """Antes el tope de filas cortaba el bucle en la tercera categoría."""
+    """El generador recorre las seis categorías, sin tope que corte antes."""
     declaradas = set(golden_set.SAFE_TOPICS)
     presentes = {f["category"] for f in filas if f["expected_decision"] == taxonomy.ALLOW}
     assert presentes == declaradas
@@ -46,7 +46,7 @@ def test_se_usan_los_diez_contextos(filas: list[dict[str, str]]) -> None:
 
 
 def test_las_ocho_clases_del_esquema_estan_representadas(filas: list[dict[str, str]]) -> None:
-    """Incluida POLITICS, que antes no aparecía."""
+    """Las ocho, incluida POLITICS."""
     presentes = {f["expected_primary_label"] for f in filas}
     assert presentes == set(taxonomy.LABELS)
 

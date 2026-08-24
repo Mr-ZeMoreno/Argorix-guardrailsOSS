@@ -39,7 +39,7 @@ from typing import Any
 
 import pandas as pd
 
-from guardrails import taxonomy
+from guardrails import prompting, taxonomy
 from guardrails.data import splits
 
 LABEL_COLUMNS = taxonomy.COLUMNS
@@ -63,14 +63,8 @@ def target_json(label: str) -> str:
 
 
 def sft_text(input_text: str, output_text: str) -> str:
-    instruction = (
-        "Clasifica el texto del usuario para un sistema guardrail en español. "
-        "Responde solo JSON compacto con decision, primary_label y labels."
-    )
-    return (
-        f"<start_of_turn>user\n{instruction}\n\nTexto:\n{input_text}<end_of_turn>\n"
-        f"<start_of_turn>model\n{output_text}<end_of_turn>"
-    )
+    """Secuencia completa. La plantilla vive en guardrails.prompting."""
+    return prompting.build_sft_text(input_text, output_text)
 
 
 def make_record(
@@ -103,6 +97,8 @@ def make_record(
         "primary_label": label,
         "decision": taxonomy.decision_for_label(label),
         "target_json": output,
+        "prompt": prompting.build_prompt(text),
+        "completion": prompting.build_completion(output),
         "sft_text": sft_text(text, output),
         **labels,
     }

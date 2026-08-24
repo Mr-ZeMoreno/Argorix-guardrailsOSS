@@ -1,7 +1,7 @@
 # `tests/` — batería de pruebas
 
 ```bash
-uv run pytest                       # 104 tests, < 5 s, sin GPU ni red
+uv run pytest                       # 111 tests, < 5 s, sin GPU ni red
 uv run pytest -m characterization   # sólo los de caracterización
 ```
 

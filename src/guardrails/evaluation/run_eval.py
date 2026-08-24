@@ -32,6 +32,7 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from guardrails import prompting
 from guardrails.evaluation import metrics
 from guardrails.serving import normalization
 
@@ -50,11 +51,8 @@ EXAMPLES = [
 
 
 def build_prompt(text: str) -> str:
-    instruction = (
-        "Clasifica el texto del usuario para un sistema guardrail en español. "
-        "Responde solo JSON compacto con decision, primary_label y labels."
-    )
-    return f"<start_of_turn>user\n{instruction}\n\nTexto:\n{text}<end_of_turn>\n<start_of_turn>model\n"
+    """Prompt de inferencia. Debe coincidir con el del entrenamiento."""
+    return prompting.build_prompt(text)
 
 
 def parse_args() -> argparse.Namespace:

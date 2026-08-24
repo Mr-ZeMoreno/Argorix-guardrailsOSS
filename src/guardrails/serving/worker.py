@@ -11,13 +11,12 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+from guardrails import prompting
+
 
 def build_prompt(text: str) -> str:
-    instruction = (
-        "Clasifica el texto del usuario para un sistema guardrail en español. "
-        "Responde solo JSON compacto con decision, primary_label y labels."
-    )
-    return f"<start_of_turn>user\n{instruction}\n\nTexto:\n{text}<end_of_turn>\n<start_of_turn>model\n"
+    """Prompt de inferencia. Debe coincidir con el del entrenamiento."""
+    return prompting.build_prompt(text)
 
 
 def extract_json(text: str) -> dict:

@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from guardrails import taxonomy
+from guardrails import prompting, taxonomy
 from guardrails.data import splits
 
 #: Alias del esquema canónico. La definición vive en guardrails.taxonomy.
@@ -116,14 +116,8 @@ def target_json(labels: dict[str, bool]) -> str:
 
 
 def sft_text(input_text: str, output_text: str) -> str:
-    instruction = (
-        "Clasifica el texto del usuario para un sistema guardrail en español. "
-        "Responde solo JSON compacto con decision, primary_label y labels."
-    )
-    return (
-        f"<start_of_turn>user\n{instruction}\n\nTexto:\n{input_text}<end_of_turn>\n"
-        f"<start_of_turn>model\n{output_text}<end_of_turn>"
-    )
+    """Secuencia completa. La plantilla vive en guardrails.prompting."""
+    return prompting.build_sft_text(input_text, output_text)
 
 
 def base_record(
@@ -165,6 +159,11 @@ def base_record(
         "primary_label": primary_label(labels),
         "decision": decision_for(labels),
         "target_json": output_text,
+        # TRL calcula la pérdida sólo sobre el completado cuando el dataset
+        # tiene estas dos columnas. Con un único campo de texto lo trata como
+        # language modeling y rechaza esa opción.
+        "prompt": prompting.build_prompt(text_es),
+        "completion": prompting.build_completion(output_text),
         "sft_text": sft_text(text_es, output_text),
         **labels,
     }

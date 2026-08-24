@@ -27,6 +27,8 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from guardrails import prompting
+
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
@@ -65,10 +67,6 @@ class SaveStateCallback(TrainerCallback):
             ),
             encoding="utf-8",
         )
-
-
-#: Marca a partir de la cual empieza el completado dentro de ``sft_text``.
-COMPLETION_MARKER = "<start_of_turn>model\n"
 
 
 def consumed_ids(dataset) -> list[str]:
@@ -112,10 +110,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _ensure_prompt_completion(dataset):
+    """Garantiza las columnas ``prompt`` y ``completion``.
+
+    TRL sólo calcula la pérdida sobre el completado si el dataset viene en ese
+    formato; con un único campo de texto lo trata como *language modeling* y
+    rechaza la opción con ValueError. Los parquets generados antes de que el
+    esquema incluyera las dos columnas se derivan a partir de ``sft_text``.
+    """
+    if {"prompt", "completion"} <= set(dataset.column_names):
+        return dataset
+    if "sft_text" not in dataset.column_names:
+        raise ValueError("el dataset no tiene columnas prompt/completion ni sft_text del que derivarlas")
+
+    def dividir(row):
+        prompt, completion = prompting.split_sft_text(row["sft_text"])
+        return {"prompt": prompt, "completion": completion}
+
+    return dataset.map(dividir)
+
+
 def load_sft_splits(dataset_path: Path, max_train: int | None, max_eval: int | None, seed: int):
     """Particiones de entrenamiento y validación, ya barajadas y recortadas."""
     dataset = load_dataset("parquet", data_files=str(dataset_path), split="train")
-    keep_columns = {"sft_text", "split", "primary_label", "decision", "id", "group_id"}
+    dataset = _ensure_prompt_completion(dataset)
+    keep_columns = {"prompt", "completion", "split", "primary_label", "decision", "id", "group_id"}
     remove_columns = [column for column in dataset.column_names if column not in keep_columns]
     dataset = dataset.remove_columns(remove_columns)
 
@@ -223,7 +242,8 @@ def main() -> None:
         fp16=args.fp16 or not args.bf16,
         gradient_checkpointing=True,
         report_to="none",
-        dataset_text_field="sft_text",
+        # Sin dataset_text_field: el dataset viene en formato prompt-completion,
+        # que es el único con el que TRL admite completion_only_loss.
         packing=False,
         seed=args.seed,
         # La pérdida se calcula sólo sobre el JSON de salida. Sin esto, la mayor
@@ -237,11 +257,15 @@ def main() -> None:
         save_strategy="steps",
     )
 
+    # El colador de TRL decide el formato por las claves del primer ejemplo: si
+    # ve cualquier otra columna de texto, vuelve a tratarlo como language
+    # modeling. Se le pasan sólo las dos que necesita.
+    columnas = ["prompt", "completion"]
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=eval_ds,
+        train_dataset=train_ds.select_columns(columnas),
+        eval_dataset=eval_ds.select_columns(columnas),
         peft_config=peft_config,
         processing_class=tokenizer,
         callbacks=[SaveStateCallback(args.output_dir)],
